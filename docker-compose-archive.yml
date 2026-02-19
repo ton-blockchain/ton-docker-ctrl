@@ -15,10 +15,11 @@ services:
       GLOBAL_CONFIG_URL: ${GLOBAL_CONFIG_URL}
       IGNORE_MINIMAL_REQS: ${IGNORE_MINIMAL_REQS}
       MYTONCTRL_VERSION: ${MYTONCTRL_VERSION}
-      DUMP: ${DUMP}
+      DUMP: false
       MODE: ${MODE}
-      ARCHIVE_TTL: ${ARCHIVE_TTL}
-      STATE_TTL: ${STATE_TTL}
+      ARCHIVE_BLOCKS: 0
+      ARCHIVE_TTL: 1000000000
+      STATE_TTL: 1000000000
       VERBOSITY: ${VERBOSITY}
       PUBLIC_IP: ${PUBLIC_IP}
       VALIDATOR_PORT: ${VALIDATOR_PORT}
@@ -32,5 +33,15 @@ services:
 volumes:
   ton:
     name: ton-work
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/ton/ton
   mytoncore:
     name: mytoncore
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/ton/mtc

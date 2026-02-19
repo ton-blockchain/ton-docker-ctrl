@@ -1,10 +1,10 @@
-name: ton-docker-ctrl latest
+name: ton-docker-ctrl testnet
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'main'
+  schedule:
+    # Run every day at midnight UTC
+    - cron: '0 0 * * *'
 
 env:
   REGISTRY: ghcr.io
@@ -15,9 +15,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
-        with:
-          submodules: 'recursive'
+        uses: actions/checkout@v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -32,19 +30,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get next tag
-        id: tag
-        run: |
-          git fetch --all --tags
-          git tag -l
-          NEW_TAG=v$(date +'%Y.%m')
-          FOUND=$(git tag -l | grep $NEW_TAG | wc -l)
-          if [ $FOUND -eq 0 ]; then
-            echo "TAG=$NEW_TAG" >> $GITHUB_OUTPUT
-          else
-            echo "TAG=$NEW_TAG-$FOUND" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build and push
         id: docker_build
         uses: docker/build-push-action@v6
@@ -52,6 +37,8 @@ jobs:
           platforms: linux/amd64
           push: true
           context: ./
+          build-args: |
+            TON_BRANCH=testnet
+            GLOBAL_CONFIG_URL=https://ton.org/testnet-global.config.json
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:testnet

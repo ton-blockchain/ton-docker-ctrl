@@ -1,7 +1,12 @@
 services:
   ton-node:
-    image: ghcr.io/ton-blockchain/ton-docker-ctrl:${TON_BRANCH:-latest}
+    image: ton-node
     container_name: ton-node
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TON_BRANCH: ${TON_BRANCH:-latest}
     restart: unless-stopped
     ports:
       - "0.0.0.0:$VALIDATOR_PORT:$VALIDATOR_PORT/udp"
