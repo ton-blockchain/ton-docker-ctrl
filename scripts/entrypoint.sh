@@ -55,13 +55,26 @@ echo "Downloading global config from ${GLOBAL_CONFIG_URL}"
 wget -q ${GLOBAL_CONFIG_URL} -O /usr/bin/ton/global.config.json
 
 if [ ! -f /var/ton-work/db/mtc_done ]; then
+
+  if [ "$TON_BRANCH" == "latest" ]; then
+    branch="master"
+  else
+    branch="$TON_BRANCH"
+  fi
+  cd /usr/src/ton
+  git checkout -b $branch
+  rm -rf *
+  git pull origin $branch
+
   echo "Installing MyTonCtrl, version ${MYTONCTRL_VERSION}"
   wget -q https://raw.githubusercontent.com/ton-blockchain/mytonctrl/${MYTONCTRL_VERSION}/scripts/install.sh -O /tmp/install.sh
   if [ "$TELEMETRY" = false ]; then export TELEMETRY="-t"; else export TELEMETRY=""; fi
   if [ "$IGNORE_MINIMAL_REQS" = true ]; then export IGNORE_MINIMAL_REQS="-i"; else export IGNORE_MINIMAL_REQS=""; fi
   if [ "$DUMP" = true ]; then export DUMP="-d"; else export DUMP=""; fi
   if [ "$TON_BRANCH" != "latest" ]; then export NETWORK="-n testnet"; else export NETWORK=""; fi
+  echo
   echo /bin/bash /tmp/install.sh ${TELEMETRY} ${IGNORE_MINIMAL_REQS} -b ${MYTONCTRL_VERSION} -m ${MODE} ${DUMP} ${NETWORK}
+  echo
   /bin/bash /tmp/install.sh ${TELEMETRY} ${IGNORE_MINIMAL_REQS} -b ${MYTONCTRL_VERSION} -m ${MODE} ${DUMP} ${NETWORK}
   echo
   echo "Updating and restarting services"
