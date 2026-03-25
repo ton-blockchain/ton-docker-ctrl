@@ -18,6 +18,8 @@ VALIDATOR_SERVICE=/etc/systemd/system/validator.service
 MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
 VALIDATOR_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/validator.service
 MYTONCORE_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/mytoncore.service
+SYSTEMCTL_BIN=/usr/bin/systemctl
+SYSTEMCTL_REAL_BIN=/usr/bin/systemctl-real
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
 MYTONCTRL_PYTHON_PATTERNS=(
@@ -81,6 +83,29 @@ fi
 
 echo "Downloading global config from ${GLOBAL_CONFIG_URL}"
 wget -q ${GLOBAL_CONFIG_URL} -O /usr/bin/ton/global.config.json
+
+setup_systemctl_wrapper() {
+  if [ ! -x "${SYSTEMCTL_REAL_BIN}" ]; then
+    mv "${SYSTEMCTL_BIN}" "${SYSTEMCTL_REAL_BIN}"
+  fi
+
+  cat > "${SYSTEMCTL_BIN}" <<'EOF'
+#!/bin/bash
+# SYSTEMCTL_WRAPPER
+SYSTEMCTL_REAL_BIN=/usr/bin/systemctl-real
+if [ ! -x "${SYSTEMCTL_REAL_BIN}" ]; then
+  echo "systemctl wrapper error: ${SYSTEMCTL_REAL_BIN} not found" >&2
+  exit 127
+fi
+exec "${SYSTEMCTL_REAL_BIN}" --no-warn "$@" 2> >(
+  sed -u \
+    -e '/^ERROR:systemctl:/d' \
+    -e '/^WARNING:systemctl:/d' \
+    >&2
+)
+EOF
+  chmod +x "${SYSTEMCTL_BIN}"
+}
 
 restore_service_units() {
   mkdir -p "${SYSTEMD_UNITS_DIR}"
@@ -161,16 +186,20 @@ restart_or_start_service() {
   local service_name="$1"
 
   echo "Restarting ${service_name}"
-  if ! systemctl restart "${service_name}"; then
+  if ! run_systemctl restart "${service_name}"; then
     echo "Restart failed for ${service_name}, trying start"
-    if ! systemctl start "${service_name}"; then
+    if ! run_systemctl start "${service_name}"; then
       echo "Failed to start ${service_name}, continuing"
     fi
   fi
 }
 
+run_systemctl() {
+  "${SYSTEMCTL_BIN}" "$@"
+}
+
 enable_managed_services() {
-  if ! systemctl enable validator.service mytoncore.service; then
+  if ! run_systemctl enable validator.service mytoncore.service; then
     echo "Failed to enable validator/mytoncore, continuing"
   fi
 }
@@ -238,6 +267,7 @@ apply_service_overrides() {
 
 first_install=false
 
+setup_systemctl_wrapper
 restore_python_modules_from_cache
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
@@ -284,7 +314,7 @@ echo "Applying service overrides from environment"
 echo
 apply_service_overrides
 persist_service_units
-if ! systemctl daemon-reload; then
+if ! run_systemctl daemon-reload; then
   echo "systemctl daemon-reload failed, continuing"
 fi
 enable_managed_services
@@ -295,4 +325,4 @@ if [ "${first_install}" = true ]; then
 fi
 
 echo "Service started!"
-exec /usr/bin/systemctl
+exec "${SYSTEMCTL_BIN}"
