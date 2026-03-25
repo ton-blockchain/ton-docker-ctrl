@@ -12,6 +12,12 @@ TELEMETRY=${TELEMETRY:-true}
 DUMP=${DUMP:-false}
 MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
+MTC_DONE_FILE=/var/ton-work/db/mtc_done
+SYSTEMD_UNITS_DIR=/var/ton-work/db/systemd-units
+VALIDATOR_SERVICE=/etc/systemd/system/validator.service
+MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
+VALIDATOR_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/validator.service
+MYTONCORE_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/mytoncore.service
 
 echo "Started with environment variables:"
 echo
@@ -56,15 +62,113 @@ fi
 echo "Downloading global config from ${GLOBAL_CONFIG_URL}"
 wget -q ${GLOBAL_CONFIG_URL} -O /usr/bin/ton/global.config.json
 
-if [ ! -f /var/ton-work/db/mtc_done ]; then
+restore_service_units() {
+  mkdir -p "${SYSTEMD_UNITS_DIR}"
 
+  if [ ! -f "${VALIDATOR_SERVICE}" ] && [ -f "${VALIDATOR_SERVICE_CACHE}" ]; then
+    cp "${VALIDATOR_SERVICE_CACHE}" "${VALIDATOR_SERVICE}"
+    echo "Restored validator.service from ${VALIDATOR_SERVICE_CACHE}"
+  fi
+
+  if [ ! -f "${MYTONCORE_SERVICE}" ] && [ -f "${MYTONCORE_SERVICE_CACHE}" ]; then
+    cp "${MYTONCORE_SERVICE_CACHE}" "${MYTONCORE_SERVICE}"
+    echo "Restored mytoncore.service from ${MYTONCORE_SERVICE_CACHE}"
+  fi
+}
+
+persist_service_units() {
+  mkdir -p "${SYSTEMD_UNITS_DIR}"
+
+  if [ -f "${VALIDATOR_SERVICE}" ]; then
+    cp "${VALIDATOR_SERVICE}" "${VALIDATOR_SERVICE_CACHE}"
+  fi
+
+  if [ -f "${MYTONCORE_SERVICE}" ]; then
+    cp "${MYTONCORE_SERVICE}" "${MYTONCORE_SERVICE_CACHE}"
+  fi
+}
+
+restart_or_start_service() {
+  local service_name="$1"
+
+  echo "Restarting ${service_name}"
+  if ! systemctl restart "${service_name}"; then
+    echo "Restart failed for ${service_name}, trying start"
+    if ! systemctl start "${service_name}"; then
+      echo "Failed to start ${service_name}, continuing"
+    fi
+  fi
+}
+
+ensure_service_units() {
+  if [ -f "${VALIDATOR_SERVICE}" ] && [ -f "${MYTONCORE_SERVICE}" ]; then
+    return
+  fi
+
+  restore_service_units
+
+  if [ -f "${VALIDATOR_SERVICE}" ] && [ -f "${MYTONCORE_SERVICE}" ]; then
+    return
+  fi
+
+  echo "Systemd service files are missing and no persisted copies were found in ${SYSTEMD_UNITS_DIR}"
+  echo "Run one bootstrap start (without ${MTC_DONE_FILE}) to regenerate them."
+  exit 1
+}
+
+apply_service_overrides() {
+  ln -sf /proc/$$/fd/1 /usr/local/bin/mytoncore/mytoncore.log
+  ln -sf /proc/$$/fd/1 /var/log/syslog
+
+  if [ -f "${VALIDATOR_SERVICE}" ]; then
+    sed -i 's/--logname \/var\/ton-work\/log//g' "${VALIDATOR_SERVICE}"
+    # Ensure service logs go to container stdout/stderr via console
+    sed -i '/^StandardOutput=/d;/^StandardError=/d' "${VALIDATOR_SERVICE}"
+    sed -i 's/\[Service\]/\[Service\]\nStandardOutput=journal+console\nStandardError=journal+console/' "${VALIDATOR_SERVICE}"
+    sed -i -e "s/--verbosity\s[[:digit:]]\+/--verbosity ${VERBOSITY}/g" "${VALIDATOR_SERVICE}"
+    sed -i -e "s/--archive-ttl\s[[:digit:]]\+/--archive-ttl ${ARCHIVE_TTL}/g" "${VALIDATOR_SERVICE}"
+
+    # Add --state-ttl parameter if not already present
+    if ! grep -q "\-\-state-ttl" "${VALIDATOR_SERVICE}"; then
+      sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --state-ttl ${STATE_TTL}/g" "${VALIDATOR_SERVICE}"
+    else
+      # Replace existing --state-ttl value if already present
+      sed -i -e "s/--state-ttl\s[[:digit:]]\+/--state-ttl ${STATE_TTL}/g" "${VALIDATOR_SERVICE}"
+    fi
+
+    # Add --sync-before parameter if not already present
+    if ! grep -q "\-\-sync-before" "${VALIDATOR_SERVICE}"; then
+      if grep -q "\-\-state-ttl" "${VALIDATOR_SERVICE}"; then
+        sed -i -e "s/--state-ttl ${STATE_TTL}/--state-ttl ${STATE_TTL} --sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
+      elif grep -q "\-\-archive-ttl" "${VALIDATOR_SERVICE}"; then
+        sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
+      else
+        sed -i -E "/^ExecStart=.*validator-engine/ s/$/ --sync-before ${SYNC_BEFORE}/" "${VALIDATOR_SERVICE}"
+      fi
+    else
+      # Replace existing --sync-before value if already present
+      sed -i -e "s/--sync-before\s[[:digit:]]\+/--sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
+    fi
+  else
+    echo "validator.service not found, skipping validator args update"
+  fi
+
+  if [ -f "${MYTONCORE_SERVICE}" ]; then
+    sed -i '/^StandardOutput=/d;/^StandardError=/d' "${MYTONCORE_SERVICE}"
+    sed -i 's/\[Service\]/\[Service\]\nStandardOutput=journal+console\nStandardError=journal+console/' "${MYTONCORE_SERVICE}"
+  else
+    echo "mytoncore.service not found, skipping mytoncore service update"
+  fi
+}
+
+if [ ! -f "${MTC_DONE_FILE}" ]; then
   if [ "$TON_BRANCH" == "latest" ]; then
     branch="master"
   else
     branch="$TON_BRANCH"
   fi
   cd /usr/src/ton
-  git checkout -b $branch
+  git checkout -B $branch
   rm -rf *
   git pull origin $branch
 
@@ -78,56 +182,24 @@ if [ ! -f /var/ton-work/db/mtc_done ]; then
   echo /bin/bash /tmp/install.sh ${TELEMETRY} ${IGNORE_MINIMAL_REQS} -b ${MYTONCTRL_VERSION} -m ${MODE} ${DUMP} ${NETWORK}
   echo
   /bin/bash /tmp/install.sh ${TELEMETRY} ${IGNORE_MINIMAL_REQS} -b ${MYTONCTRL_VERSION} -m ${MODE} ${DUMP} ${NETWORK}
-  echo
-  echo "Updating and restarting services"
-  echo
-  ln -sf /proc/$$/fd/1 /usr/local/bin/mytoncore/mytoncore.log
-  ln -sf /proc/$$/fd/1 /var/log/syslog
-  sed -i 's/--logname \/var\/ton-work\/log//g' /etc/systemd/system/validator.service
-  # Ensure service logs go to container stdout/stderr via console
-  sed -i '/^StandardOutput=/d;/^StandardError=/d' /etc/systemd/system/validator.service
-  sed -i '/^StandardOutput=/d;/^StandardError=/d' /etc/systemd/system/mytoncore.service
-  sed -i 's/\[Service\]/\[Service\]\nStandardOutput=journal+console\nStandardError=journal+console/' /etc/systemd/system/validator.service
-  sed -i 's/\[Service\]/\[Service\]\nStandardOutput=journal+console\nStandardError=journal+console/' /etc/systemd/system/mytoncore.service
-  sed -i -e "s/--verbosity\s[[:digit:]]\+/--verbosity ${VERBOSITY}/g" /etc/systemd/system/validator.service
-  sed -i -e "s/--archive-ttl\s[[:digit:]]\+/--archive-ttl ${ARCHIVE_TTL}/g" /etc/systemd/system/validator.service
 
-  # Add --state-ttl parameter if not already present
-  if ! grep -q "\-\-state-ttl" /etc/systemd/system/validator.service; then
-      sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --state-ttl ${STATE_TTL}/g" /etc/systemd/system/validator.service
-  else
-      # Replace existing --state-ttl value if already present
-      sed -i -e "s/--state-ttl\s[[:digit:]]\+/--state-ttl ${STATE_TTL}/g" /etc/systemd/system/validator.service
-  fi
-
-  # Add --sync-before parameter if not already present
-  if ! grep -q "\-\-sync-before" /etc/systemd/system/validator.service; then
-      if grep -q "\-\-state-ttl" /etc/systemd/system/validator.service; then
-          sed -i -e "s/--state-ttl ${STATE_TTL}/--state-ttl ${STATE_TTL} --sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
-      elif grep -q "\-\-archive-ttl" /etc/systemd/system/validator.service; then
-          sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
-      else
-          sed -i -E "/^ExecStart=.*validator-engine/ s/$/ --sync-before ${SYNC_BEFORE}/" /etc/systemd/system/validator.service
-      fi
-  else
-      # Replace existing --sync-before value if already present
-      sed -i -e "s/--sync-before\s[[:digit:]]\+/--sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
-  fi
-
-  touch /var/ton-work/db/mtc_done
-
-  systemctl daemon-reload
-  echo "Restarting validator"
-  systemctl restart validator
-  echo "Restarting mytoncore"
-  systemctl restart mytoncore
+  touch "${MTC_DONE_FILE}"
 else
   echo "MyTonCtrl already installed"
-  echo "Starting validator"
-#  systemctl start validator
-  echo "Starting mytoncore"
-#  systemctl start mytoncore
 fi
+
+ensure_service_units
+
+echo
+echo "Applying service overrides from environment"
+echo
+apply_service_overrides
+persist_service_units
+if ! systemctl daemon-reload; then
+  echo "systemctl daemon-reload failed, continuing"
+fi
+restart_or_start_service validator
+restart_or_start_service mytoncore
 
 echo "Service started!"
 exec /usr/bin/systemctl
