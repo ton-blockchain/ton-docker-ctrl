@@ -5,6 +5,7 @@ TON_BRANCH=${TON_BRANCH:-latest}
 GLOBAL_CONFIG_URL=${GLOBAL_CONFIG_URL:-https://ton.org/global.config.json}
 ARCHIVE_TTL=${ARCHIVE_TTL:-86400}
 STATE_TTL=${STATE_TTL:-86400}
+SYNC_BEFORE=${SYNC_BEFORE:-3600}
 VERBOSITY=${VERBOSITY:-1}
 IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
 TELEMETRY=${TELEMETRY:-true}
@@ -22,6 +23,7 @@ echo GLOBAL_CONFIG_URL $GLOBAL_CONFIG_URL
 echo ARCHIVE_BLOCKS $ARCHIVE_BLOCKS
 echo ARCHIVE_TTL $ARCHIVE_TTL
 echo STATE_TTL $STATE_TTL
+echo SYNC_BEFORE $SYNC_BEFORE
 echo VERBOSITY $VERBOSITY
 echo TELEMETRY $TELEMETRY
 echo MODE $MODE
@@ -96,6 +98,20 @@ if [ ! -f /var/ton-work/db/mtc_done ]; then
   else
       # Replace existing --state-ttl value if already present
       sed -i -e "s/--state-ttl\s[[:digit:]]\+/--state-ttl ${STATE_TTL}/g" /etc/systemd/system/validator.service
+  fi
+
+  # Add --sync-before parameter if not already present
+  if ! grep -q "\-\-sync-before" /etc/systemd/system/validator.service; then
+      if grep -q "\-\-state-ttl" /etc/systemd/system/validator.service; then
+          sed -i -e "s/--state-ttl ${STATE_TTL}/--state-ttl ${STATE_TTL} --sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
+      elif grep -q "\-\-archive-ttl" /etc/systemd/system/validator.service; then
+          sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
+      else
+          sed -i -E "/^ExecStart=.*validator-engine/ s/$/ --sync-before ${SYNC_BEFORE}/" /etc/systemd/system/validator.service
+      fi
+  else
+      # Replace existing --sync-before value if already present
+      sed -i -e "s/--sync-before\s[[:digit:]]\+/--sync-before ${SYNC_BEFORE}/g" /etc/systemd/system/validator.service
   fi
 
   touch /var/ton-work/db/mtc_done

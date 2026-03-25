@@ -21,6 +21,7 @@ Build environment variables are configured in the `.env `file:
 * **DUMP** - Use pre-packaged dump. Reduces duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
 * **ARCHIVE_TTL** - Archive time-to-live in seconds for the validator (default **86400**)
 * **STATE_TTL** - State time-to-live in seconds for the validator (default **86400**)
+* **SYNC_BEFORE** - Initial sync download all blocks for the last given seconds (default **3600**)
 * **VERBOSITY** - Verbosity level for the validator engine (default **1**)
 * **PUBLIC_IP** - Used when automatic detection of external IP does not work, e.g. in Kubernetes.
 * **VALIDATOR_PORT** - Set custom validator UDP port (default **random**)
