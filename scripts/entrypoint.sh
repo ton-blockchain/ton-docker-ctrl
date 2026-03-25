@@ -18,6 +18,26 @@ VALIDATOR_SERVICE=/etc/systemd/system/validator.service
 MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
 VALIDATOR_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/validator.service
 MYTONCORE_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/mytoncore.service
+PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
+MYTONCTRL_PYTHON_PATTERNS=(
+  myton*
+  mypylib*
+  mypyconsole*
+  modules*
+  crc16*
+  fastcrc*
+  psutil*
+  nacl*
+  PyNaCl*
+  requests*
+  cffi*
+  charset_normalizer*
+  idna*
+  urllib3*
+  certifi*
+  pycparser*
+)
 
 echo "Started with environment variables:"
 echo
@@ -88,6 +108,55 @@ persist_service_units() {
   fi
 }
 
+restore_python_modules_from_cache() {
+  mkdir -p "${PYTHON_MODULES_CACHE_DIR}" "${PYTHON_SITE_DIR}"
+
+  if python3 -c "import mytoncore" >/dev/null 2>&1; then
+    return
+  fi
+
+  local restored=false
+
+  for pattern in "${MYTONCTRL_PYTHON_PATTERNS[@]}"; do
+    for cached_path in "${PYTHON_MODULES_CACHE_DIR}"/${pattern}; do
+      if [ -e "${cached_path}" ]; then
+        cp -a "${cached_path}" "${PYTHON_SITE_DIR}/"
+        restored=true
+      fi
+    done
+  done
+
+  if [ "${restored}" = true ]; then
+    echo "Restored MyTonCtrl python packages from ${PYTHON_MODULES_CACHE_DIR}"
+  fi
+}
+
+persist_python_modules_to_cache() {
+  if ! python3 -c "import mytoncore" >/dev/null 2>&1; then
+    return
+  fi
+
+  mkdir -p "${PYTHON_MODULES_CACHE_DIR}"
+  for pattern in "${MYTONCTRL_PYTHON_PATTERNS[@]}"; do
+    rm -rf "${PYTHON_MODULES_CACHE_DIR}"/${pattern} 2>/dev/null || true
+  done
+
+  local copied=false
+
+  for pattern in "${MYTONCTRL_PYTHON_PATTERNS[@]}"; do
+    for module_path in "${PYTHON_SITE_DIR}"/${pattern}; do
+      if [ -e "${module_path}" ]; then
+        cp -a "${module_path}" "${PYTHON_MODULES_CACHE_DIR}/"
+        copied=true
+      fi
+    done
+  done
+
+  if [ "${copied}" = true ]; then
+    echo "Persisted MyTonCtrl python packages to ${PYTHON_MODULES_CACHE_DIR}"
+  fi
+}
+
 restart_or_start_service() {
   local service_name="$1"
 
@@ -97,6 +166,12 @@ restart_or_start_service() {
     if ! systemctl start "${service_name}"; then
       echo "Failed to start ${service_name}, continuing"
     fi
+  fi
+}
+
+enable_managed_services() {
+  if ! systemctl enable validator.service mytoncore.service; then
+    echo "Failed to enable validator/mytoncore, continuing"
   fi
 }
 
@@ -161,7 +236,19 @@ apply_service_overrides() {
   fi
 }
 
+first_install=false
+
+restore_python_modules_from_cache
+
 if [ ! -f "${MTC_DONE_FILE}" ]; then
+  first_install=true
+  echo "MyTonCtrl bootstrap required: ${MTC_DONE_FILE} not found"
+else
+  echo "MyTonCtrl already installed"
+fi
+
+if [ "${first_install}" = true ]; then
+
   if [ "$TON_BRANCH" == "latest" ]; then
     branch="master"
   else
@@ -184,8 +271,10 @@ if [ ! -f "${MTC_DONE_FILE}" ]; then
   /bin/bash /tmp/install.sh ${TELEMETRY} ${IGNORE_MINIMAL_REQS} -b ${MYTONCTRL_VERSION} -m ${MODE} ${DUMP} ${NETWORK}
 
   touch "${MTC_DONE_FILE}"
-else
-  echo "MyTonCtrl already installed"
+  persist_python_modules_to_cache
+elif ! python3 -c "import mytoncore" >/dev/null 2>&1; then
+  echo "WARNING: mytoncore python module is missing after restore."
+  echo "Skipping reinstall by policy. To reinstall manually, remove ${MTC_DONE_FILE} and restart."
 fi
 
 ensure_service_units
@@ -198,8 +287,12 @@ persist_service_units
 if ! systemctl daemon-reload; then
   echo "systemctl daemon-reload failed, continuing"
 fi
-restart_or_start_service validator
-restart_or_start_service mytoncore
+enable_managed_services
+
+if [ "${first_install}" = true ]; then
+  restart_or_start_service validator
+  restart_or_start_service mytoncore
+fi
 
 echo "Service started!"
 exec /usr/bin/systemctl
