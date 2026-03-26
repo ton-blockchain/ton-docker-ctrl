@@ -19,7 +19,7 @@ RUN set -eux; \
         python3-dev python3-pip sudo git fio iproute2 \
         plzip pv aria2 ninja-build rocksdb-tools \
         autoconf automake libtool iputils-ping nload jq bc xxd htop \
-        libsecp256k1-dev libsodium-dev liblz4-dev; \
+        libsecp256k1-dev libsodium-dev liblz4-dev libjemalloc2; \
     ln -sf /usr/bin/clang-21 /usr/bin/clang; \
     ln -sf /usr/bin/clang++-21 /usr/bin/clang++; \
     curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal; \
