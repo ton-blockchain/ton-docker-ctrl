@@ -19,6 +19,7 @@ VALIDATOR_SERVICE=/etc/systemd/system/validator.service
 MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
 VALIDATOR_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/validator.service
 MYTONCORE_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/mytoncore.service
+MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
 DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
 DUMP_CACHE_LINK=/tmp/latest.tar.lz
@@ -185,6 +186,24 @@ persist_python_modules_to_cache() {
   if [ "${copied}" = true ]; then
     echo "Persisted MyTonCtrl python packages to ${PYTHON_MODULES_CACHE_DIR}"
   fi
+}
+
+ensure_mytonctrl_cli() {
+  if [ -x "${MYTONCTRL_CLI_FILE}" ]; then
+    return
+  fi
+
+  if ! python3 -c "import mytonctrl" >/dev/null 2>&1; then
+    echo "WARNING: mytonctrl python module is missing, ${MYTONCTRL_CLI_FILE} cannot be restored."
+    return
+  fi
+
+  cat > "${MYTONCTRL_CLI_FILE}" <<'EOF'
+#!/bin/bash
+exec /usr/bin/python3 -m mytonctrl "$@"
+EOF
+  chmod +x "${MYTONCTRL_CLI_FILE}"
+  echo "Restored ${MYTONCTRL_CLI_FILE}"
 }
 
 ensure_dump_cache_link() {
@@ -386,6 +405,7 @@ elif ! python3 -c "import mytoncore" >/dev/null 2>&1; then
   echo "Skipping reinstall by policy. To reinstall manually, remove ${MTC_DONE_FILE} and restart."
 fi
 
+ensure_mytonctrl_cli
 ensure_service_units
 
 echo
