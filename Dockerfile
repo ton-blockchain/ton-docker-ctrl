@@ -30,10 +30,18 @@ RUN set -eux; \
         /var/ton-work/db/static \
         /var/ton-work/db/import \
         /var/ton-work/db/keyring \
-        /usr/src/ton; \
+        /usr/src/ton \
+        /usr/src/mytonctrl \
+        /usr/src/ton-teleport-btc-periphery; \
     cd /usr/src/ton; \
     git init; \
     git remote add origin https://github.com/ton-blockchain/ton.git; \
+    cd /usr/src/mytonctrl; \
+    git init; \
+    git remote add origin https://github.com/ton-blockchain/mytonctrl.git; \
+    cd /usr/src/ton-teleport-btc-periphery; \
+    git init; \
+    git remote add origin https://github.com/RSquad/ton-teleport-btc-periphery.git; \
     wget -nv https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/master/files/docker/systemctl3.py \
         -O /usr/bin/systemctl; \
     chmod +x /usr/bin/systemctl; \
