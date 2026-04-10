@@ -9,7 +9,16 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: ubuntu-22.04
+            platform: linux/amd64
+          - arch: arm64
+            runs_on: ubuntu-22.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v3
@@ -46,8 +55,10 @@ jobs:
         id: docker_build
         uses: docker/build-push-action@v6
         with:
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: true
           context: ./
+          build-args: |
+            TON_BRANCH=${{ steps.tag.outputs.TAG }}-${{ matrix.arch }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}-${{ matrix.arch }}
