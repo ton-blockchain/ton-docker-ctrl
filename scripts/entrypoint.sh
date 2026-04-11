@@ -19,6 +19,9 @@ VALIDATOR_SERVICE=/etc/systemd/system/validator.service
 MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
 VALIDATOR_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/validator.service
 MYTONCORE_SERVICE_CACHE=${SYSTEMD_UNITS_DIR}/mytoncore.service
+SYSTEMD_UNITS_FALLBACK_DIR=/usr/local/bin/mytoncore/systemd-units
+VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
+MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
 DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
@@ -113,29 +116,84 @@ EOF
   chmod +x "${SYSTEMCTL_BIN}"
 }
 
-restore_service_units() {
-  mkdir -p "${SYSTEMD_UNITS_DIR}"
+service_file_present() {
+  local file_path="$1"
+  [ -s "${file_path}" ]
+}
 
-  if [ ! -f "${VALIDATOR_SERVICE}" ] && [ -f "${VALIDATOR_SERVICE_CACHE}" ]; then
+systemd_units_available() {
+  service_file_present "${VALIDATOR_SERVICE}" && service_file_present "${MYTONCORE_SERVICE}"
+}
+
+systemd_units_cached() {
+  (service_file_present "${VALIDATOR_SERVICE_CACHE}" || service_file_present "${VALIDATOR_SERVICE_FALLBACK_CACHE}") &&
+    (service_file_present "${MYTONCORE_SERVICE_CACHE}" || service_file_present "${MYTONCORE_SERVICE_FALLBACK_CACHE}")
+}
+
+normalize_ton_permissions() {
+  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets
+  mkdir -p /var/ton-work/db/error 2>/dev/null || true
+
+  for path in \
+    /var/ton-work \
+    /var/ton-work/db \
+    /var/ton-work/db/keyring \
+    /var/ton-work/db/systemd-units \
+    /var/ton-work/db/error \
+    /var/ton-work/keys \
+    /usr/local/bin/mytoncore \
+    /usr/local/bin/mytoncore/wallets; do
+    [ -e "${path}" ] || continue
+    chown validator:validator "${path}" 2>/dev/null || true
+  done
+
+  if [ -f "${TON_DB_DIR}/config.json" ]; then
+    chown validator:validator "${TON_DB_DIR}/config.json" 2>/dev/null || true
+  fi
+}
+
+restore_service_units() {
+  mkdir -p "${SYSTEMD_UNITS_DIR}" "${SYSTEMD_UNITS_FALLBACK_DIR}"
+
+  if [ ! -f "${VALIDATOR_SERVICE}" ] && [ -s "${VALIDATOR_SERVICE_CACHE}" ]; then
     cp "${VALIDATOR_SERVICE_CACHE}" "${VALIDATOR_SERVICE}"
     echo "Restored validator.service from ${VALIDATOR_SERVICE_CACHE}"
+  elif [ ! -f "${VALIDATOR_SERVICE}" ] && [ -s "${VALIDATOR_SERVICE_FALLBACK_CACHE}" ]; then
+    cp "${VALIDATOR_SERVICE_FALLBACK_CACHE}" "${VALIDATOR_SERVICE}"
+    cp "${VALIDATOR_SERVICE_FALLBACK_CACHE}" "${VALIDATOR_SERVICE_CACHE}" 2>/dev/null || true
+    echo "Restored validator.service from ${VALIDATOR_SERVICE_FALLBACK_CACHE}"
   fi
 
-  if [ ! -f "${MYTONCORE_SERVICE}" ] && [ -f "${MYTONCORE_SERVICE_CACHE}" ]; then
+  if [ ! -f "${MYTONCORE_SERVICE}" ] && [ -s "${MYTONCORE_SERVICE_CACHE}" ]; then
     cp "${MYTONCORE_SERVICE_CACHE}" "${MYTONCORE_SERVICE}"
     echo "Restored mytoncore.service from ${MYTONCORE_SERVICE_CACHE}"
+  elif [ ! -f "${MYTONCORE_SERVICE}" ] && [ -s "${MYTONCORE_SERVICE_FALLBACK_CACHE}" ]; then
+    cp "${MYTONCORE_SERVICE_FALLBACK_CACHE}" "${MYTONCORE_SERVICE}"
+    cp "${MYTONCORE_SERVICE_FALLBACK_CACHE}" "${MYTONCORE_SERVICE_CACHE}" 2>/dev/null || true
+    echo "Restored mytoncore.service from ${MYTONCORE_SERVICE_FALLBACK_CACHE}"
   fi
 }
 
 persist_service_units() {
-  mkdir -p "${SYSTEMD_UNITS_DIR}"
+  mkdir -p "${SYSTEMD_UNITS_DIR}" "${SYSTEMD_UNITS_FALLBACK_DIR}"
 
   if [ -f "${VALIDATOR_SERVICE}" ]; then
     cp "${VALIDATOR_SERVICE}" "${VALIDATOR_SERVICE_CACHE}"
+    cp "${VALIDATOR_SERVICE}" "${VALIDATOR_SERVICE_FALLBACK_CACHE}"
   fi
 
   if [ -f "${MYTONCORE_SERVICE}" ]; then
     cp "${MYTONCORE_SERVICE}" "${MYTONCORE_SERVICE_CACHE}"
+    cp "${MYTONCORE_SERVICE}" "${MYTONCORE_SERVICE_FALLBACK_CACHE}"
+  fi
+}
+
+prepare_bootstrap_marker_state() {
+  restore_service_units
+
+  if [ -f "${MTC_DONE_FILE}" ] && ! systemd_units_available && ! systemd_units_cached; then
+    echo "Detected ${MTC_DONE_FILE} but no persisted systemd unit files; forcing one bootstrap run."
+    rm -f "${MTC_DONE_FILE}" || true
   fi
 }
 
@@ -351,9 +409,12 @@ apply_service_overrides() {
 }
 
 first_install=false
+bootstrap_completed=false
 
 setup_systemctl_wrapper
 restore_python_modules_from_cache
+prepare_bootstrap_marker_state
+normalize_ton_permissions
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
@@ -398,7 +459,7 @@ if [ "${first_install}" = true ]; then
 
   cleanup_dump_cache_if_ready
 
-  touch "${MTC_DONE_FILE}"
+  bootstrap_completed=true
   persist_python_modules_to_cache
 elif ! python3 -c "import mytoncore" >/dev/null 2>&1; then
   echo "WARNING: mytoncore python module is missing after restore."
@@ -413,6 +474,12 @@ echo "Applying service overrides from environment"
 echo
 apply_service_overrides
 persist_service_units
+normalize_ton_permissions
+
+if [ "${bootstrap_completed}" = true ]; then
+  touch "${MTC_DONE_FILE}"
+fi
+
 if ! run_systemctl daemon-reload; then
   echo "systemctl daemon-reload failed, continuing"
 fi
