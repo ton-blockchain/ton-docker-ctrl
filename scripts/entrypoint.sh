@@ -7,6 +7,7 @@ ARCHIVE_TTL=${ARCHIVE_TTL:-86400}
 STATE_TTL=${STATE_TTL:-86400}
 SYNC_BEFORE=${SYNC_BEFORE:-3600}
 VERBOSITY=${VERBOSITY:-1}
+CUSTOM_PARAMETERS=${CUSTOM_PARAMETERS:-}
 IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
 TELEMETRY=${TELEMETRY:-true}
 DUMP=${DUMP:-false}
@@ -27,6 +28,7 @@ DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
 DUMP_CACHE_LINK=/tmp/latest.tar.lz
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-1024}
+CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 SYSTEMCTL_REAL_BIN=/usr/bin/systemctl-real
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -62,6 +64,7 @@ echo ARCHIVE_TTL $ARCHIVE_TTL
 echo STATE_TTL $STATE_TTL
 echo SYNC_BEFORE $SYNC_BEFORE
 echo VERBOSITY $VERBOSITY
+echo CUSTOM_PARAMETERS "$CUSTOM_PARAMETERS"
 echo TELEMETRY $TELEMETRY
 echo MODE $MODE
 echo PUBLIC_IP $PUBLIC_IP
@@ -363,6 +366,145 @@ ensure_service_units() {
   exit 1
 }
 
+sanitize_engine_config_ports() {
+  local config_file="${TON_DB_DIR}/config.json"
+
+  if [ ! -s "${config_file}" ]; then
+    return
+  fi
+
+  if ! python3 - "${config_file}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+
+def dedupe_by_port(entries):
+    if not isinstance(entries, list):
+        return entries, 0
+
+    kept = []
+    seen_ports = set()
+    removed = 0
+
+    for item in reversed(entries):
+        if isinstance(item, dict) and "port" in item:
+            port = item.get("port")
+            if port in seen_ports:
+                removed += 1
+                continue
+            seen_ports.add(port)
+        kept.append(item)
+
+    kept.reverse()
+    return kept, removed
+
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if not isinstance(data, dict):
+    raise SystemExit(0)
+
+removed_total = 0
+for key in ("control", "liteservers"):
+    deduped, removed = dedupe_by_port(data.get(key))
+    if removed > 0:
+        data[key] = deduped
+        removed_total += removed
+
+if removed_total == 0:
+    raise SystemExit(0)
+
+fd, tmp_path = tempfile.mkstemp(
+    prefix=".config.",
+    suffix=".tmp",
+    dir=os.path.dirname(path) or ".",
+)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, path)
+finally:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+
+print(f"Sanitized {removed_total} duplicate validator port entries in {path}")
+PY
+  then
+    chown validator:validator "${config_file}" 2>/dev/null || true
+  else
+    echo "WARNING: Failed to sanitize duplicate ports in ${config_file}"
+  fi
+}
+
+apply_custom_parameters_override() {
+  if [ ! -f "${VALIDATOR_SERVICE}" ]; then
+    return
+  fi
+
+  local previous_custom_parameters=""
+  if [ -f "${CUSTOM_PARAMETERS_STATE_FILE}" ]; then
+    previous_custom_parameters=$(cat "${CUSTOM_PARAMETERS_STATE_FILE}")
+  fi
+
+  if python3 - "${VALIDATOR_SERVICE}" "${previous_custom_parameters}" "${CUSTOM_PARAMETERS}" <<'PY'
+import pathlib
+import re
+import sys
+
+service_path = pathlib.Path(sys.argv[1])
+previous_parameters = sys.argv[2]
+current_parameters = sys.argv[3]
+
+lines = service_path.read_text(encoding="utf-8").splitlines(keepends=True)
+updated = False
+matched = False
+
+for index, line in enumerate(lines):
+    match = re.match(r"^(ExecStart\s*=\s*)(.*?)(\r?\n?)$", line)
+    if not match:
+        continue
+
+    prefix, command, line_ending = match.groups()
+    if "validator-engine" not in command:
+        continue
+
+    matched = True
+    command = command.rstrip()
+
+    if previous_parameters:
+        previous_suffix = " " + previous_parameters
+        if command.endswith(previous_suffix):
+            command = command[: -len(previous_suffix)].rstrip()
+            updated = True
+
+    if current_parameters:
+        current_suffix = " " + current_parameters
+        if not command.endswith(current_suffix):
+            command = f"{command}{current_suffix}"
+            updated = True
+
+    lines[index] = f"{prefix}{command}{line_ending}"
+    break
+
+if not matched:
+    raise SystemExit(2)
+
+if updated:
+    service_path.write_text("".join(lines), encoding="utf-8")
+PY
+  then
+    printf '%s' "${CUSTOM_PARAMETERS}" > "${CUSTOM_PARAMETERS_STATE_FILE}"
+  else
+    echo "WARNING: Failed to apply CUSTOM_PARAMETERS to ${VALIDATOR_SERVICE}"
+  fi
+}
+
 apply_service_overrides() {
   ln -sf /proc/$$/fd/1 /usr/local/bin/mytoncore/mytoncore.log
   ln -sf /proc/$$/fd/1 /var/log/syslog
@@ -396,6 +538,8 @@ apply_service_overrides() {
       # Replace existing --sync-before value if already present
       sed -i -e "s/--sync-before\s[[:digit:]]\+/--sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
     fi
+
+    apply_custom_parameters_override
   else
     echo "validator.service not found, skipping validator args update"
   fi
@@ -473,6 +617,7 @@ echo
 echo "Applying service overrides from environment"
 echo
 apply_service_overrides
+sanitize_engine_config_ports
 persist_service_units
 normalize_ton_permissions
 

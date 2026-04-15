@@ -23,6 +23,7 @@ Build environment variables are configured in the `.env `file:
 * **STATE_TTL** - State time-to-live in seconds for the validator (default **86400**)
 * **SYNC_BEFORE** - Initial sync download all blocks for the last given seconds (default **3600**)
 * **VERBOSITY** - Verbosity level for the validator engine (default **1**)
+* **CUSTOM_PARAMETERS** - Additional parameters appended to the end of `validator-engine` `ExecStart` command in `validator.service` (default empty)
 * **PUBLIC_IP** - Used when automatic detection of external IP does not work, e.g. in Kubernetes.
 * **VALIDATOR_PORT** - Set custom validator UDP port (default **random**)
 * **LITESERVER_PORT** - Set custom lite-server TCP port (default **random**)
