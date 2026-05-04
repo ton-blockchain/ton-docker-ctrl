@@ -30,7 +30,6 @@ DUMP_CACHE_LINK=/tmp/latest.tar.lz
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-1024}
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
-SYSTEMCTL_REAL_BIN=/usr/bin/systemctl-real
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
 MYTONCTRL_PYTHON_PATTERNS=(
@@ -95,29 +94,6 @@ fi
 
 echo "Downloading global config from ${GLOBAL_CONFIG_URL}"
 wget -q ${GLOBAL_CONFIG_URL} -O /usr/bin/ton/global.config.json
-
-setup_systemctl_wrapper() {
-  if [ ! -x "${SYSTEMCTL_REAL_BIN}" ]; then
-    mv "${SYSTEMCTL_BIN}" "${SYSTEMCTL_REAL_BIN}"
-  fi
-
-  cat > "${SYSTEMCTL_BIN}" <<'EOF'
-#!/bin/bash
-# SYSTEMCTL_WRAPPER
-SYSTEMCTL_REAL_BIN=/usr/bin/systemctl-real
-if [ ! -x "${SYSTEMCTL_REAL_BIN}" ]; then
-  echo "systemctl wrapper error: ${SYSTEMCTL_REAL_BIN} not found" >&2
-  exit 127
-fi
-exec "${SYSTEMCTL_REAL_BIN}" --no-warn "$@" 2> >(
-  sed -u \
-    -e '/^ERROR:systemctl:/d' \
-    -e '/^WARNING:systemctl:/d' \
-    >&2
-)
-EOF
-  chmod +x "${SYSTEMCTL_BIN}"
-}
 
 service_file_present() {
   local file_path="$1"
@@ -555,7 +531,6 @@ apply_service_overrides() {
 first_install=false
 bootstrap_completed=false
 
-setup_systemctl_wrapper
 restore_python_modules_from_cache
 prepare_bootstrap_marker_state
 normalize_ton_permissions
