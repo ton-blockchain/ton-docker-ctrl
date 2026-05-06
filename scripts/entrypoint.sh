@@ -5,7 +5,6 @@ TON_BRANCH=${TON_BRANCH:-latest}
 GLOBAL_CONFIG_URL=${GLOBAL_CONFIG_URL:-https://ton.org/global.config.json}
 ARCHIVE_TTL=${ARCHIVE_TTL:-86400}
 STATE_TTL=${STATE_TTL:-86400}
-SYNC_BEFORE=${SYNC_BEFORE:-3600}
 VERBOSITY=${VERBOSITY:-1}
 CUSTOM_PARAMETERS=${CUSTOM_PARAMETERS:-}
 IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
@@ -61,7 +60,6 @@ echo GLOBAL_CONFIG_URL $GLOBAL_CONFIG_URL
 echo ARCHIVE_BLOCKS $ARCHIVE_BLOCKS
 echo ARCHIVE_TTL $ARCHIVE_TTL
 echo STATE_TTL $STATE_TTL
-echo SYNC_BEFORE $SYNC_BEFORE
 echo VERBOSITY $VERBOSITY
 echo CUSTOM_PARAMETERS "$CUSTOM_PARAMETERS"
 echo TELEMETRY $TELEMETRY
@@ -499,20 +497,6 @@ apply_service_overrides() {
     else
       # Replace existing --state-ttl value if already present
       sed -i -e "s/--state-ttl\s[[:digit:]]\+/--state-ttl ${STATE_TTL}/g" "${VALIDATOR_SERVICE}"
-    fi
-
-    # Add --sync-before parameter if not already present
-    if ! grep -q "\-\-sync-before" "${VALIDATOR_SERVICE}"; then
-      if grep -q "\-\-state-ttl" "${VALIDATOR_SERVICE}"; then
-        sed -i -e "s/--state-ttl ${STATE_TTL}/--state-ttl ${STATE_TTL} --sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
-      elif grep -q "\-\-archive-ttl" "${VALIDATOR_SERVICE}"; then
-        sed -i -e "s/--archive-ttl ${ARCHIVE_TTL}/--archive-ttl ${ARCHIVE_TTL} --sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
-      else
-        sed -i -E "/^ExecStart=.*validator-engine/ s/$/ --sync-before ${SYNC_BEFORE}/" "${VALIDATOR_SERVICE}"
-      fi
-    else
-      # Replace existing --sync-before value if already present
-      sed -i -e "s/--sync-before\s[[:digit:]]\+/--sync-before ${SYNC_BEFORE}/g" "${VALIDATOR_SERVICE}"
     fi
 
     apply_custom_parameters_override
