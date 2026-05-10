@@ -2,6 +2,9 @@ name: ton-docker-ctrl testnet
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - testnet
   schedule:
     # Run every day at midnight UTC
     - cron: '0 0 * * *'
@@ -16,6 +19,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: testnet
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
