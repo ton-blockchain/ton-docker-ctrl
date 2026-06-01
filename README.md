@@ -19,7 +19,7 @@ Build environment variables are configured in the `.env `file:
 * **IGNORE_MINIMAL_REQS** - Ignore hardware requirements (default **false**)
 * **MODE** - Install MyTonCtrl with specified mode (validator or liteserver, default **validator**)
 * **DUMP** - Use pre-packaged dump. Reduces duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
-* **DUMP_DATA_THRESHOLD_MB** - Minimal `/var/ton-work/db` size (in MB) required to treat dump payload as ready and skip re-download (default **20480**)
+* **DUMP_DATA_THRESHOLD_MB** - Minimal `/var/ton-work/db` payload size (in MB, excluding `latest.tar.lz` cache artifacts) required to treat dump as ready and skip re-download (default **102400**)
 * **ARCHIVE_TTL** - Archive time-to-live in seconds for the validator (default **86400**)
 * **STATE_TTL** - State time-to-live in seconds for the validator (default **86400**)
 * **SYNC_BEFORE** - Initial sync download all blocks for the last given seconds (default **3600**)

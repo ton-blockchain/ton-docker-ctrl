@@ -31,7 +31,8 @@ DUMP_ARIA2_CONTROL_FILE=${DUMP_CACHE_FILE}.aria2
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-102400}
 DUMP_LOG_SUMMARY_LINES=${DUMP_LOG_SUMMARY_LINES:-120}
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
-INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
+INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest.*\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
+INVALID_RANGE_DUMP_LOG_PATTERN='errorCode=8 URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Invalid range header\.'
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -272,6 +273,53 @@ dump_db_size_mb() {
   du -sm "${TON_DB_DIR}" 2>/dev/null | awk '{print $1}'
 }
 
+dump_file_size_bytes() {
+  local file_path="$1"
+  if [ -f "${file_path}" ]; then
+    stat -c '%s' "${file_path}" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
+
+dump_payload_size_mb() {
+  local total_bytes
+  local cache_bytes
+  local aria2_bytes
+  local payload_bytes
+
+  total_bytes=$(du -sb "${TON_DB_DIR}" 2>/dev/null | awk '{print $1}')
+  if [ -z "${total_bytes}" ]; then
+    echo ""
+    return
+  fi
+
+  cache_bytes=$(dump_file_size_bytes "${DUMP_CACHE_FILE}")
+  aria2_bytes=$(dump_file_size_bytes "${DUMP_ARIA2_CONTROL_FILE}")
+
+  payload_bytes=$(( total_bytes - cache_bytes - aria2_bytes ))
+  if [ "${payload_bytes}" -lt 0 ]; then
+    payload_bytes=0
+  fi
+
+  echo $(( payload_bytes / 1024 / 1024 ))
+}
+
+is_dump_payload_ready() {
+  local payload_mb
+
+  payload_mb=$(dump_payload_size_mb)
+  if [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
+    return 1
+  fi
+
+  if [ -n "${payload_mb}" ] && [ "${payload_mb}" -ge "${DUMP_DATA_THRESHOLD_MB}" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 log_dump_diagnostics() {
   if [ "${DUMP}" != true ]; then
     return
@@ -279,11 +327,14 @@ log_dump_diagnostics() {
 
   local stage="$1"
   local db_size_mb
+  local payload_size_mb
   db_size_mb=$(dump_db_size_mb)
+  payload_size_mb=$(dump_payload_size_mb)
 
   echo "==== Dump diagnostics: ${stage} ===="
   echo "Dump markers: ready=$([ -f "${DUMP_MARKER_FILE}" ] && echo yes || echo no), incomplete=$([ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ] && echo yes || echo no)"
-  echo "Dump DB size: ${db_size_mb:-unknown}MB (threshold ${DUMP_DATA_THRESHOLD_MB}MB)"
+  echo "Dump DB size (total): ${db_size_mb:-unknown}MB"
+  echo "Dump payload size (excluding cache/control): ${payload_size_mb:-unknown}MB (threshold ${DUMP_DATA_THRESHOLD_MB}MB)"
 
   if [ -f "${DUMP_CACHE_FILE}" ]; then
     stat -c "Dump cache file: %n size=%s mtime=%y" "${DUMP_CACHE_FILE}" 2>/dev/null || true
@@ -320,20 +371,33 @@ summarize_dump_install_log() {
 }
 
 dump_payload_present() {
-  local db_size_mb
-
-  db_size_mb=$(dump_db_size_mb)
-
   if [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
     echo "Dump payload check: ${DUMP_ARIA2_CONTROL_FILE} exists, treating payload as incomplete"
     return 1
   fi
 
-  if [ -n "${db_size_mb}" ] && [ "${db_size_mb}" -ge "${DUMP_DATA_THRESHOLD_MB}" ]; then
-    return 0
+  is_dump_payload_ready
+}
+
+reconcile_dump_markers() {
+  if [ "${DUMP}" != true ]; then
+    return
   fi
 
-  return 1
+  if [ -f "${DUMP_MARKER_FILE}" ] && ! is_dump_payload_ready; then
+    echo "Removing stale ${DUMP_MARKER_FILE}: payload is not ready yet"
+    rm -f "${DUMP_MARKER_FILE}" || true
+  fi
+
+  if [ -f "${DUMP_MARKER_FILE}" ] && [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ]; then
+    echo "Found both ${DUMP_MARKER_FILE} and ${DUMP_INCOMPLETE_MARKER_FILE}; removing ready marker and retrying dump"
+    rm -f "${DUMP_MARKER_FILE}" || true
+  fi
+
+  if [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ] && is_dump_payload_ready; then
+    echo "Removing stale ${DUMP_INCOMPLETE_MARKER_FILE}: payload is already ready"
+    rm -f "${DUMP_INCOMPLETE_MARKER_FILE}" || true
+  fi
 }
 
 mark_dump_as_ready_if_present() {
@@ -362,8 +426,9 @@ resolve_install_dump_arg() {
     return
   fi
 
-  log_dump_diagnostics "before dump decision"
   ensure_dump_cache_link
+  reconcile_dump_markers
+  log_dump_diagnostics "before dump decision"
 
   if [ -f "${DUMP_MARKER_FILE}" ]; then
     echo "Skipping dump download: marker ${DUMP_MARKER_FILE} already exists"
@@ -371,6 +436,10 @@ resolve_install_dump_arg() {
   fi
 
   if [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ]; then
+    if [ -f "${DUMP_CACHE_FILE}" ] && [ ! -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
+      rm -f "${DUMP_CACHE_FILE}" || true
+      echo "Removed stale ${DUMP_CACHE_FILE}: incomplete marker exists but aria2 control file is missing."
+    fi
     echo "Retrying dump download: previous attempt was incomplete"
     INSTALL_DUMP_ARG="-d"
     DUMP_DOWNLOAD_REQUESTED=true
@@ -398,8 +467,14 @@ detect_incomplete_dump_download() {
     return 1
   fi
 
+  DUMP_DOWNLOAD_NEEDS_CLEAN_START=false
+
   if grep -Eq "${INCOMPLETE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
     echo "Detected dump download failure pattern in ${INSTALL_LOG_FILE}"
+    if grep -Eq "${INVALID_RANGE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
+      DUMP_DOWNLOAD_NEEDS_CLEAN_START=true
+      echo "Detected invalid range during dump download. Next retry will start from scratch."
+    fi
     summarize_dump_install_log
     return 0
   fi
@@ -635,6 +710,7 @@ first_install=false
 bootstrap_completed=false
 DUMP_DOWNLOAD_REQUESTED=false
 DUMP_DOWNLOAD_INCOMPLETE=false
+DUMP_DOWNLOAD_NEEDS_CLEAN_START=false
 
 restore_python_modules_from_cache
 prepare_bootstrap_marker_state
@@ -681,6 +757,10 @@ if [ "${first_install}" = true ]; then
     DUMP_DOWNLOAD_INCOMPLETE=true
     touch "${DUMP_INCOMPLETE_MARKER_FILE}"
     rm -f "${DUMP_MARKER_FILE}" 2>/dev/null || true
+    if [ "${DUMP_DOWNLOAD_NEEDS_CLEAN_START}" = true ]; then
+      rm -f "${DUMP_CACHE_FILE}" "${DUMP_ARIA2_CONTROL_FILE}" 2>/dev/null || true
+      echo "Removed stale dump cache/control files after invalid range error to force clean re-download."
+    fi
     echo "Detected interrupted dump download in installer output; leaving ${DUMP_MARKER_FILE} absent"
     if [ -f "${MTC_DONE_FILE}" ]; then
       rm -f "${MTC_DONE_FILE}" || true

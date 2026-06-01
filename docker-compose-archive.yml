@@ -6,6 +6,7 @@ services:
     ports:
       - "0.0.0.0:$VALIDATOR_PORT:$VALIDATOR_PORT/udp"
       - "0.0.0.0:$LITESERVER_PORT:$LITESERVER_PORT/tcp"
+      - "0.0.0.0:$QUIC_PORT:$QUIC_PORT/udp"
     tty: true
     volumes:
       - ton:/var/ton-work
@@ -27,6 +28,7 @@ services:
       VALIDATOR_PORT: ${VALIDATOR_PORT}
       LITESERVER_PORT: ${LITESERVER_PORT}
       VALIDATOR_CONSOLE_PORT: ${VALIDATOR_CONSOLE_PORT}
+      QUIC_PORT: ${QUIC_PORT}
     logging:
       driver: "json-file"
       options:
