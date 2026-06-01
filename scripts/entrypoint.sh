@@ -24,9 +24,12 @@ VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
 MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
 DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
+DUMP_INCOMPLETE_MARKER_FILE=${TON_DB_DIR}/.dump_incomplete
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
 DUMP_CACHE_LINK=/tmp/latest.tar.lz
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-1024}
+INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
+INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest\.tar\.lz'
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -265,14 +268,22 @@ mark_dump_as_ready_if_present() {
     return
   fi
 
+  if [ "${DUMP_DOWNLOAD_INCOMPLETE}" = true ]; then
+    echo "Skipping ${DUMP_MARKER_FILE} creation: dump download did not complete"
+    return
+  fi
+
   if dump_payload_present && [ ! -f "${DUMP_MARKER_FILE}" ]; then
     touch "${DUMP_MARKER_FILE}"
+    rm -f "${DUMP_INCOMPLETE_MARKER_FILE}" 2>/dev/null || true
     echo "Detected existing TON DB payload and created ${DUMP_MARKER_FILE}"
   fi
 }
 
 resolve_install_dump_arg() {
   INSTALL_DUMP_ARG=""
+  DUMP_DOWNLOAD_REQUESTED=false
+  DUMP_DOWNLOAD_INCOMPLETE=false
 
   if [ "${DUMP}" != true ]; then
     return
@@ -285,13 +296,36 @@ resolve_install_dump_arg() {
     return
   fi
 
+  if [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ]; then
+    echo "Retrying dump download: previous attempt was incomplete"
+    INSTALL_DUMP_ARG="-d"
+    DUMP_DOWNLOAD_REQUESTED=true
+    return
+  fi
+
   if dump_payload_present; then
-    touch "${DUMP_MARKER_FILE}"
     echo "Skipping dump download: existing TON DB payload detected in ${TON_DB_DIR}"
     return
   fi
 
   INSTALL_DUMP_ARG="-d"
+  DUMP_DOWNLOAD_REQUESTED=true
+}
+
+detect_incomplete_dump_download() {
+  if [ "${DUMP_DOWNLOAD_REQUESTED}" != true ]; then
+    return 1
+  fi
+
+  if [ ! -f "${INSTALL_LOG_FILE}" ]; then
+    return 1
+  fi
+
+  if grep -Eq "${INCOMPLETE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
+    return 0
+  fi
+
+  return 1
 }
 
 cleanup_dump_cache_if_ready() {
@@ -514,6 +548,8 @@ apply_service_overrides() {
 
 first_install=false
 bootstrap_completed=false
+DUMP_DOWNLOAD_REQUESTED=false
+DUMP_DOWNLOAD_INCOMPLETE=false
 
 restore_python_modules_from_cache
 prepare_bootstrap_marker_state
@@ -547,11 +583,23 @@ if [ "${first_install}" = true ]; then
   echo
   echo /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   echo
+  rm -f "${INSTALL_LOG_FILE}" 2>/dev/null || true
   set +e
-  /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
-  install_rc=$?
+  /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG} 2>&1 | tee "${INSTALL_LOG_FILE}"
+  install_rc=${PIPESTATUS[0]}
   set -e
-  mark_dump_as_ready_if_present
+
+  if detect_incomplete_dump_download; then
+    DUMP_DOWNLOAD_INCOMPLETE=true
+    touch "${DUMP_INCOMPLETE_MARKER_FILE}"
+    rm -f "${DUMP_MARKER_FILE}" 2>/dev/null || true
+    echo "Detected interrupted dump download in installer output; leaving ${DUMP_MARKER_FILE} absent"
+    if [ -f "${MTC_DONE_FILE}" ]; then
+      rm -f "${MTC_DONE_FILE}" || true
+    fi
+    echo "Dump download was requested but did not complete; failing bootstrap to retry on next start."
+    exit 1
+  fi
 
   if [ "${install_rc}" -ne 0 ]; then
     cleanup_dump_cache_if_ready
@@ -560,6 +608,7 @@ if [ "${first_install}" = true ]; then
     exit "${install_rc}"
   fi
 
+  mark_dump_as_ready_if_present
   cleanup_dump_cache_if_ready
 
   bootstrap_completed=true
