@@ -30,9 +30,10 @@ DUMP_CACHE_LINK=/tmp/latest.tar.lz
 DUMP_ARIA2_CONTROL_FILE=${DUMP_CACHE_FILE}.aria2
 DUMP_ARIA2_CONTROL_LINK=${DUMP_CACHE_LINK}.aria2
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-102400}
+DUMP_VERIFY_INCOMPLETE_CACHE=${DUMP_VERIFY_INCOMPLETE_CACHE:-true}
 DUMP_LOG_SUMMARY_LINES=${DUMP_LOG_SUMMARY_LINES:-120}
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
-INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest.*\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
+INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest.*\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.|Data error in worker|tar: Error is not recoverable: exiting now|Last member in input file is truncated or corrupt'
 INVALID_RANGE_DUMP_LOG_PATTERN='errorCode=8 URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Invalid range header\.'
 MISSING_ARIA2_CONTROL_DUMP_LOG_PATTERN='errorCode=13|control file\(\*\.aria2\) does not exist|File .*latest.*\.tar\.lz exists, but .*\.aria2 does not exist'
 SKIPPED_DUMP_LOG_PATTERN='start FirstNodeSettings fuction|Validators config .+ already exist\. Break FirstNodeSettings fuction'
@@ -427,6 +428,26 @@ dump_install_log_has_download_activity() {
   return 1
 }
 
+verify_incomplete_dump_cache_integrity() {
+  if [ ! -f "${DUMP_CACHE_FILE}" ]; then
+    return 1
+  fi
+
+  if [ "${DUMP_VERIFY_INCOMPLETE_CACHE}" != true ]; then
+    echo "Skipping dump cache integrity check: DUMP_VERIFY_INCOMPLETE_CACHE=${DUMP_VERIFY_INCOMPLETE_CACHE}"
+    return 2
+  fi
+
+  echo "Verifying incomplete dump cache integrity with plzip -t: ${DUMP_CACHE_FILE}"
+  if plzip -t "${DUMP_CACHE_FILE}"; then
+    echo "Dump cache integrity check passed."
+    return 0
+  fi
+
+  echo "Dump cache integrity check failed for ${DUMP_CACHE_FILE}. Cache will be removed to force clean re-download."
+  return 1
+}
+
 reconcile_dump_markers() {
   if [ "${DUMP}" != true ]; then
     return
@@ -487,7 +508,12 @@ resolve_install_dump_arg() {
     DUMP_RETRY_FROM_INCOMPLETE=true
     if [ -f "${DUMP_CACHE_FILE}" ] && [ ! -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
       echo "Incomplete marker exists and aria2 control file is missing."
-      echo "Will retry with existing cache first; if aria2 reports missing control file, next retry will clean-start."
+      if verify_incomplete_dump_cache_integrity; then
+        echo "Will retry with existing validated cache and re-run extraction."
+      else
+        rm -f "${DUMP_CACHE_FILE}" "${DUMP_ARIA2_CONTROL_FILE}" 2>/dev/null || true
+        echo "Removed stale/corrupted dump cache due to missing aria2 control file."
+      fi
     fi
     force_dump_retry_bootstrap_reset
     echo "Retrying dump download: previous attempt was incomplete"
