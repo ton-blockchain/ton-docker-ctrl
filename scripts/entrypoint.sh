@@ -27,9 +27,11 @@ DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
 DUMP_INCOMPLETE_MARKER_FILE=${TON_DB_DIR}/.dump_incomplete
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
 DUMP_CACHE_LINK=/tmp/latest.tar.lz
-DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-1024}
+DUMP_ARIA2_CONTROL_FILE=${DUMP_CACHE_FILE}.aria2
+DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-102400}
+DUMP_LOG_SUMMARY_LINES=${DUMP_LOG_SUMMARY_LINES:-120}
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
-INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest\.tar\.lz'
+INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -227,7 +229,21 @@ persist_python_modules_to_cache() {
 }
 
 ensure_mytonctrl_cli() {
+  local needs_restore=true
+
   if [ -x "${MYTONCTRL_CLI_FILE}" ]; then
+    if head -n 1 "${MYTONCTRL_CLI_FILE}" 2>/dev/null | grep -q '^#!'; then
+      if grep -q 'python3 -m mytonctrl' "${MYTONCTRL_CLI_FILE}" 2>/dev/null; then
+        needs_restore=false
+      else
+        echo "Existing ${MYTONCTRL_CLI_FILE} does not use python mytonctrl module wrapper, recreating."
+      fi
+    else
+      echo "Existing ${MYTONCTRL_CLI_FILE} is not a script wrapper, recreating."
+    fi
+  fi
+
+  if [ "${needs_restore}" != true ]; then
     return
   fi
 
@@ -252,10 +268,67 @@ ensure_dump_cache_link() {
   ln -sf "${DUMP_CACHE_FILE}" "${DUMP_CACHE_LINK}"
 }
 
+dump_db_size_mb() {
+  du -sm "${TON_DB_DIR}" 2>/dev/null | awk '{print $1}'
+}
+
+log_dump_diagnostics() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  local stage="$1"
+  local db_size_mb
+  db_size_mb=$(dump_db_size_mb)
+
+  echo "==== Dump diagnostics: ${stage} ===="
+  echo "Dump markers: ready=$([ -f "${DUMP_MARKER_FILE}" ] && echo yes || echo no), incomplete=$([ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ] && echo yes || echo no)"
+  echo "Dump DB size: ${db_size_mb:-unknown}MB (threshold ${DUMP_DATA_THRESHOLD_MB}MB)"
+
+  if [ -f "${DUMP_CACHE_FILE}" ]; then
+    stat -c "Dump cache file: %n size=%s mtime=%y" "${DUMP_CACHE_FILE}" 2>/dev/null || true
+  else
+    echo "Dump cache file: ${DUMP_CACHE_FILE} missing"
+  fi
+
+  if [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
+    stat -c "Dump aria2 control file: %n size=%s mtime=%y" "${DUMP_ARIA2_CONTROL_FILE}" 2>/dev/null || true
+  else
+    echo "Dump aria2 control file: ${DUMP_ARIA2_CONTROL_FILE} missing"
+  fi
+
+  for path in config.json state archive files celldb; do
+    if [ -e "${TON_DB_DIR}/${path}" ]; then
+      echo "DB entry present: ${TON_DB_DIR}/${path}"
+    else
+      echo "DB entry missing: ${TON_DB_DIR}/${path}"
+    fi
+  done
+
+  echo "==== End dump diagnostics: ${stage} ===="
+}
+
+summarize_dump_install_log() {
+  if [ ! -f "${INSTALL_LOG_FILE}" ]; then
+    echo "Dump install log is missing: ${INSTALL_LOG_FILE}"
+    return
+  fi
+
+  echo "==== Dump-related lines from ${INSTALL_LOG_FILE} (last ${DUMP_LOG_SUMMARY_LINES}) ===="
+  grep -Ei 'dump|latest\.tar\.lz|aria2|download (results|aborted)|errorCode=' "${INSTALL_LOG_FILE}" | tail -n "${DUMP_LOG_SUMMARY_LINES}" || true
+  echo "==== End dump install log summary ===="
+}
+
 dump_payload_present() {
   local db_size_mb
 
-  db_size_mb=$(du -sm "${TON_DB_DIR}" 2>/dev/null | awk '{print $1}')
+  db_size_mb=$(dump_db_size_mb)
+
+  if [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
+    echo "Dump payload check: ${DUMP_ARIA2_CONTROL_FILE} exists, treating payload as incomplete"
+    return 1
+  fi
+
   if [ -n "${db_size_mb}" ] && [ "${db_size_mb}" -ge "${DUMP_DATA_THRESHOLD_MB}" ]; then
     return 0
   fi
@@ -289,6 +362,7 @@ resolve_install_dump_arg() {
     return
   fi
 
+  log_dump_diagnostics "before dump decision"
   ensure_dump_cache_link
 
   if [ -f "${DUMP_MARKER_FILE}" ]; then
@@ -305,11 +379,14 @@ resolve_install_dump_arg() {
 
   if dump_payload_present; then
     echo "Skipping dump download: existing TON DB payload detected in ${TON_DB_DIR}"
+    log_dump_diagnostics "skip download due to existing payload"
     return
   fi
 
   INSTALL_DUMP_ARG="-d"
   DUMP_DOWNLOAD_REQUESTED=true
+  echo "Dump download requested: payload marker missing and DB size below threshold"
+  log_dump_diagnostics "download requested"
 }
 
 detect_incomplete_dump_download() {
@@ -322,6 +399,14 @@ detect_incomplete_dump_download() {
   fi
 
   if grep -Eq "${INCOMPLETE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
+    echo "Detected dump download failure pattern in ${INSTALL_LOG_FILE}"
+    summarize_dump_install_log
+    return 0
+  fi
+
+  if [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
+    echo "Detected ${DUMP_ARIA2_CONTROL_FILE} after installer run, dump download is incomplete"
+    summarize_dump_install_log
     return 0
   fi
 
@@ -583,11 +668,14 @@ if [ "${first_install}" = true ]; then
   echo
   echo /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   echo
+  log_dump_diagnostics "before installer run"
   rm -f "${INSTALL_LOG_FILE}" 2>/dev/null || true
   set +e
   /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG} 2>&1 | tee "${INSTALL_LOG_FILE}"
   install_rc=${PIPESTATUS[0]}
   set -e
+  log_dump_diagnostics "after installer run"
+  summarize_dump_install_log
 
   if detect_incomplete_dump_download; then
     DUMP_DOWNLOAD_INCOMPLETE=true
@@ -609,6 +697,7 @@ if [ "${first_install}" = true ]; then
   fi
 
   mark_dump_as_ready_if_present
+  log_dump_diagnostics "after dump marker evaluation"
   cleanup_dump_cache_if_ready
 
   bootstrap_completed=true
