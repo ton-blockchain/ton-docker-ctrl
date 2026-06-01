@@ -33,6 +33,7 @@ DUMP_LOG_SUMMARY_LINES=${DUMP_LOG_SUMMARY_LINES:-120}
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
 INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest.*\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
 INVALID_RANGE_DUMP_LOG_PATTERN='errorCode=8 URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Invalid range header\.'
+SKIPPED_DUMP_LOG_PATTERN='start FirstNodeSettings fuction|Validators config .+ already exist\. Break FirstNodeSettings fuction'
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -320,6 +321,20 @@ is_dump_payload_ready() {
   return 1
 }
 
+force_dump_retry_bootstrap_reset() {
+  local config_file="${TON_DB_DIR}/config.json"
+
+  if [ -f "${config_file}" ]; then
+    rm -f "${config_file}" || true
+    echo "Removed ${config_file} to force mytoninstaller FirstNodeSettings and dump retry."
+  fi
+
+  rm -f "${VALIDATOR_SERVICE}" "${MYTONCORE_SERVICE}" 2>/dev/null || true
+  rm -f "${VALIDATOR_SERVICE_CACHE}" "${MYTONCORE_SERVICE_CACHE}" \
+    "${VALIDATOR_SERVICE_FALLBACK_CACHE}" "${MYTONCORE_SERVICE_FALLBACK_CACHE}" 2>/dev/null || true
+  echo "Removed validator/mytoncore unit files and caches to force service regeneration on dump retry."
+}
+
 log_dump_diagnostics() {
   if [ "${DUMP}" != true ]; then
     return
@@ -379,6 +394,18 @@ dump_payload_present() {
   is_dump_payload_ready
 }
 
+dump_install_log_has_download_activity() {
+  if [ ! -f "${INSTALL_LOG_FILE}" ]; then
+    return 1
+  fi
+
+  if grep -Eq 'start DownloadDump function|dumpSize:|latest(_testnet)?\.tar\.lz|aria2c -x' "${INSTALL_LOG_FILE}"; then
+    return 0
+  fi
+
+  return 1
+}
+
 reconcile_dump_markers() {
   if [ "${DUMP}" != true ]; then
     return
@@ -436,10 +463,12 @@ resolve_install_dump_arg() {
   fi
 
   if [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ]; then
+    DUMP_RETRY_FROM_INCOMPLETE=true
     if [ -f "${DUMP_CACHE_FILE}" ] && [ ! -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
       rm -f "${DUMP_CACHE_FILE}" || true
       echo "Removed stale ${DUMP_CACHE_FILE}: incomplete marker exists but aria2 control file is missing."
     fi
+    force_dump_retry_bootstrap_reset
     echo "Retrying dump download: previous attempt was incomplete"
     INSTALL_DUMP_ARG="-d"
     DUMP_DOWNLOAD_REQUESTED=true
@@ -463,11 +492,17 @@ detect_incomplete_dump_download() {
     return 1
   fi
 
+  DUMP_DOWNLOAD_NEEDS_CLEAN_START=false
+  DUMP_DOWNLOAD_NEEDS_BOOTSTRAP_RESET=false
+
   if [ ! -f "${INSTALL_LOG_FILE}" ]; then
+    if [ "${DUMP_RETRY_FROM_INCOMPLETE}" = true ]; then
+      echo "Dump retry was requested but installer log ${INSTALL_LOG_FILE} is missing."
+      DUMP_DOWNLOAD_NEEDS_BOOTSTRAP_RESET=true
+      return 0
+    fi
     return 1
   fi
-
-  DUMP_DOWNLOAD_NEEDS_CLEAN_START=false
 
   if grep -Eq "${INCOMPLETE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
     echo "Detected dump download failure pattern in ${INSTALL_LOG_FILE}"
@@ -475,6 +510,17 @@ detect_incomplete_dump_download() {
       DUMP_DOWNLOAD_NEEDS_CLEAN_START=true
       echo "Detected invalid range during dump download. Next retry will start from scratch."
     fi
+    summarize_dump_install_log
+    return 0
+  fi
+
+  if [ "${DUMP_RETRY_FROM_INCOMPLETE}" = true ] && ! dump_install_log_has_download_activity; then
+    if grep -Eq "${SKIPPED_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
+      echo "Detected dump retry skip: FirstNodeSettings was skipped because validator config already exists."
+    else
+      echo "Dump retry was requested but no download activity was detected in installer output."
+    fi
+    DUMP_DOWNLOAD_NEEDS_BOOTSTRAP_RESET=true
     summarize_dump_install_log
     return 0
   fi
@@ -711,6 +757,8 @@ bootstrap_completed=false
 DUMP_DOWNLOAD_REQUESTED=false
 DUMP_DOWNLOAD_INCOMPLETE=false
 DUMP_DOWNLOAD_NEEDS_CLEAN_START=false
+DUMP_DOWNLOAD_NEEDS_BOOTSTRAP_RESET=false
+DUMP_RETRY_FROM_INCOMPLETE=false
 
 restore_python_modules_from_cache
 prepare_bootstrap_marker_state
@@ -757,6 +805,9 @@ if [ "${first_install}" = true ]; then
     DUMP_DOWNLOAD_INCOMPLETE=true
     touch "${DUMP_INCOMPLETE_MARKER_FILE}"
     rm -f "${DUMP_MARKER_FILE}" 2>/dev/null || true
+    if [ "${DUMP_DOWNLOAD_NEEDS_BOOTSTRAP_RESET}" = true ]; then
+      force_dump_retry_bootstrap_reset
+    fi
     if [ "${DUMP_DOWNLOAD_NEEDS_CLEAN_START}" = true ]; then
       rm -f "${DUMP_CACHE_FILE}" "${DUMP_ARIA2_CONTROL_FILE}" 2>/dev/null || true
       echo "Removed stale dump cache/control files after invalid range error to force clean re-download."
