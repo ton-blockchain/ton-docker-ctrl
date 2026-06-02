@@ -14,6 +14,9 @@ MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
 TON_DB_DIR=/var/ton-work/db
 MTC_DONE_FILE=${TON_DB_DIR}/mtc_done
+DUMP_DOWNLOAD_FILE=${TON_DB_DIR}/latest.tar.lz
+DUMP_ARIA2_CONTROL_FILE=${DUMP_DOWNLOAD_FILE}.aria2
+INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
 SYSTEMD_UNITS_DIR=/var/ton-work/db/systemd-units
 VALIDATOR_SERVICE=/etc/systemd/system/validator.service
 MYTONCORE_SERVICE=/etc/systemd/system/mytoncore.service
@@ -247,6 +250,47 @@ resolve_install_dump_arg() {
   INSTALL_DUMP_ARG="-d"
 }
 
+dump_download_artifacts_present() {
+  [ -f "${DUMP_DOWNLOAD_FILE}" ] || [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]
+}
+
+clear_validator_config_for_dump_retry() {
+  echo "Removing ${TON_DB_DIR}/config.json so MyTonCtrl runs DownloadDump on this bootstrap attempt."
+  rm -f "${TON_DB_DIR}/config.json" 2>/dev/null || true
+}
+
+force_dump_download_retry_if_needed() {
+  if [ "${DUMP}" != true ] || [ -f "${MTC_DONE_FILE}" ]; then
+    return
+  fi
+
+  if ! dump_download_artifacts_present; then
+    return
+  fi
+
+  echo "Detected incomplete dump download artifacts; preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+  clear_validator_config_for_dump_retry
+}
+
+dump_download_failed_in_log() {
+  [ -f "${INSTALL_LOG_FILE}" ] && grep -q "Dump download failed" "${INSTALL_LOG_FILE}"
+}
+
+fail_if_dump_download_incomplete() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if dump_download_artifacts_present || dump_download_failed_in_log; then
+    if dump_download_artifacts_present; then
+      echo "Detected incomplete dump download artifacts; preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+    fi
+    clear_validator_config_for_dump_retry
+    echo "Dump download did not finish; leaving bootstrap incomplete so the next pod start resumes it."
+    exit 1
+  fi
+}
+
 restart_or_start_service() {
   local service_name="$1"
 
@@ -463,6 +507,7 @@ bootstrap_completed=false
 restore_python_modules_from_cache
 prepare_bootstrap_marker_state
 normalize_ton_permissions
+force_dump_download_retry_if_needed
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
@@ -492,10 +537,12 @@ if [ "${first_install}" = true ]; then
   echo
   echo /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   echo
+  rm -f "${INSTALL_LOG_FILE}" 2>/dev/null || true
   set +e
-  /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
-  install_rc=$?
+  /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG} 2>&1 | tee "${INSTALL_LOG_FILE}"
+  install_rc=${PIPESTATUS[0]}
   set -e
+  fail_if_dump_download_incomplete
 
   if [ "${install_rc}" -ne 0 ]; then
     echo "MyTonCtrl installer failed with exit code ${install_rc}."
