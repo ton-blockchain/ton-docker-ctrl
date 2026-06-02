@@ -2,6 +2,11 @@ name: ton-docker-ctrl release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Docker image tag, for example v2026.06
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -38,18 +43,12 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get next tag
+      - name: Set tag
         id: tag
+        env:
+          NEW_TAG: ${{ inputs.tag }}
         run: |
-          git fetch --all --tags
-          git tag -l
-          NEW_TAG=v$(date +'%Y.%m')
-          FOUND=$(git tag -l | grep $NEW_TAG | wc -l)
-          if [ $FOUND -eq 0 ]; then
-            echo "TAG=$NEW_TAG" >> $GITHUB_OUTPUT
-          else
-            echo "TAG=$NEW_TAG-$FOUND" >> $GITHUB_OUTPUT
-          fi
+          echo "TAG=$NEW_TAG" >> $GITHUB_OUTPUT
 
       - name: Build and push
         id: docker_build
