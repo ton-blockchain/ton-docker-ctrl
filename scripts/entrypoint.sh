@@ -28,13 +28,11 @@ DUMP_INCOMPLETE_MARKER_FILE=${TON_DB_DIR}/.dump_incomplete
 DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
 DUMP_CACHE_LINK=/tmp/latest.tar.lz
 DUMP_ARIA2_CONTROL_FILE=${DUMP_CACHE_FILE}.aria2
-DUMP_ARIA2_CONTROL_LINK=${DUMP_CACHE_LINK}.aria2
 DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-102400}
 DUMP_LOG_SUMMARY_LINES=${DUMP_LOG_SUMMARY_LINES:-120}
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
 INCOMPLETE_DUMP_LOG_PATTERN='Download .* not complete: .*latest.*\.tar\.lz|errorCode=[0-9]+ URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Name resolution for dump\.ton\.org failed|aria2 will resume download if the transfer is restarted\.'
 INVALID_RANGE_DUMP_LOG_PATTERN='errorCode=8 URI=https://dump\.ton\.org/dumps/latest.*\.tar\.lz|Invalid range header\.'
-MISSING_ARIA2_CONTROL_DUMP_LOG_PATTERN='errorCode=13|control file\(\*\.aria2\) does not exist|File .*latest.*\.tar\.lz exists, but .*\.aria2 does not exist'
 SKIPPED_DUMP_LOG_PATTERN='start FirstNodeSettings fuction|Validators config .+ already exist\. Break FirstNodeSettings fuction'
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
@@ -266,21 +264,10 @@ EOF
 
 ensure_dump_cache_link() {
   mkdir -p "${TON_DB_DIR}"
-
-  # If a previous run created a regular /tmp sidecar, move it to persistent storage.
-  if [ -f "${DUMP_ARIA2_CONTROL_LINK}" ] && [ ! -L "${DUMP_ARIA2_CONTROL_LINK}" ] && [ ! -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
-    mv -f "${DUMP_ARIA2_CONTROL_LINK}" "${DUMP_ARIA2_CONTROL_FILE}" || true
-  fi
-
   if [ -e "${DUMP_CACHE_LINK}" ] && [ ! -L "${DUMP_CACHE_LINK}" ]; then
     rm -f "${DUMP_CACHE_LINK}"
   fi
-  if [ -e "${DUMP_ARIA2_CONTROL_LINK}" ] && [ ! -L "${DUMP_ARIA2_CONTROL_LINK}" ]; then
-    rm -f "${DUMP_ARIA2_CONTROL_LINK}"
-  fi
-
   ln -sf "${DUMP_CACHE_FILE}" "${DUMP_CACHE_LINK}"
-  ln -sf "${DUMP_ARIA2_CONTROL_FILE}" "${DUMP_ARIA2_CONTROL_LINK}"
 }
 
 dump_db_size_mb() {
@@ -374,14 +361,6 @@ log_dump_diagnostics() {
     stat -c "Dump aria2 control file: %n size=%s mtime=%y" "${DUMP_ARIA2_CONTROL_FILE}" 2>/dev/null || true
   else
     echo "Dump aria2 control file: ${DUMP_ARIA2_CONTROL_FILE} missing"
-  fi
-
-  if [ -L "${DUMP_ARIA2_CONTROL_LINK}" ]; then
-    echo "Dump aria2 control link: ${DUMP_ARIA2_CONTROL_LINK} -> $(readlink "${DUMP_ARIA2_CONTROL_LINK}")"
-  elif [ -f "${DUMP_ARIA2_CONTROL_LINK}" ]; then
-    stat -c "Dump aria2 control temp file: %n size=%s mtime=%y" "${DUMP_ARIA2_CONTROL_LINK}" 2>/dev/null || true
-  else
-    echo "Dump aria2 control temp file: ${DUMP_ARIA2_CONTROL_LINK} missing"
   fi
 
   for path in config.json state archive files celldb; do
@@ -486,8 +465,8 @@ resolve_install_dump_arg() {
   if [ -f "${DUMP_INCOMPLETE_MARKER_FILE}" ]; then
     DUMP_RETRY_FROM_INCOMPLETE=true
     if [ -f "${DUMP_CACHE_FILE}" ] && [ ! -f "${DUMP_ARIA2_CONTROL_FILE}" ]; then
-      echo "Incomplete marker exists and aria2 control file is missing."
-      echo "Will retry with existing cache first; if aria2 reports missing control file, next retry will clean-start."
+      rm -f "${DUMP_CACHE_FILE}" || true
+      echo "Removed stale ${DUMP_CACHE_FILE}: incomplete marker exists but aria2 control file is missing."
     fi
     force_dump_retry_bootstrap_reset
     echo "Retrying dump download: previous attempt was incomplete"
@@ -530,10 +509,6 @@ detect_incomplete_dump_download() {
     if grep -Eq "${INVALID_RANGE_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
       DUMP_DOWNLOAD_NEEDS_CLEAN_START=true
       echo "Detected invalid range during dump download. Next retry will start from scratch."
-    fi
-    if grep -Eq "${MISSING_ARIA2_CONTROL_DUMP_LOG_PATTERN}" "${INSTALL_LOG_FILE}"; then
-      DUMP_DOWNLOAD_NEEDS_CLEAN_START=true
-      echo "Detected missing aria2 control sidecar during dump download. Next retry will start from scratch."
     fi
     summarize_dump_install_log
     return 0
