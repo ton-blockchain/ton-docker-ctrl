@@ -23,10 +23,6 @@ SYSTEMD_UNITS_FALLBACK_DIR=/usr/local/bin/mytoncore/systemd-units
 VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
 MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
-DUMP_MARKER_FILE=${TON_DB_DIR}/.dump_ready
-DUMP_CACHE_FILE=${TON_DB_DIR}/latest.tar.lz
-DUMP_CACHE_LINK=/tmp/latest.tar.lz
-DUMP_DATA_THRESHOLD_MB=${DUMP_DATA_THRESHOLD_MB:-1024}
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -241,36 +237,6 @@ EOF
   echo "Restored ${MYTONCTRL_CLI_FILE}"
 }
 
-ensure_dump_cache_link() {
-  mkdir -p "${TON_DB_DIR}"
-  if [ -e "${DUMP_CACHE_LINK}" ] && [ ! -L "${DUMP_CACHE_LINK}" ]; then
-    rm -f "${DUMP_CACHE_LINK}"
-  fi
-  ln -sf "${DUMP_CACHE_FILE}" "${DUMP_CACHE_LINK}"
-}
-
-dump_payload_present() {
-  local db_size_mb
-
-  db_size_mb=$(du -sm "${TON_DB_DIR}" 2>/dev/null | awk '{print $1}')
-  if [ -n "${db_size_mb}" ] && [ "${db_size_mb}" -ge "${DUMP_DATA_THRESHOLD_MB}" ]; then
-    return 0
-  fi
-
-  return 1
-}
-
-mark_dump_as_ready_if_present() {
-  if [ "${DUMP}" != true ]; then
-    return
-  fi
-
-  if dump_payload_present && [ ! -f "${DUMP_MARKER_FILE}" ]; then
-    touch "${DUMP_MARKER_FILE}"
-    echo "Detected existing TON DB payload and created ${DUMP_MARKER_FILE}"
-  fi
-}
-
 resolve_install_dump_arg() {
   INSTALL_DUMP_ARG=""
 
@@ -278,28 +244,7 @@ resolve_install_dump_arg() {
     return
   fi
 
-  ensure_dump_cache_link
-
-  if [ -f "${DUMP_MARKER_FILE}" ]; then
-    echo "Skipping dump download: marker ${DUMP_MARKER_FILE} already exists"
-    return
-  fi
-
-  if dump_payload_present; then
-    touch "${DUMP_MARKER_FILE}"
-    echo "Skipping dump download: existing TON DB payload detected in ${TON_DB_DIR}"
-    return
-  fi
-
   INSTALL_DUMP_ARG="-d"
-}
-
-cleanup_dump_cache_if_ready() {
-  if [ ! -f "${DUMP_MARKER_FILE}" ]; then
-    return
-  fi
-
-  rm -f "${DUMP_CACHE_FILE}"
 }
 
 restart_or_start_service() {
@@ -551,16 +496,12 @@ if [ "${first_install}" = true ]; then
   /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   install_rc=$?
   set -e
-  mark_dump_as_ready_if_present
 
   if [ "${install_rc}" -ne 0 ]; then
-    cleanup_dump_cache_if_ready
     echo "MyTonCtrl installer failed with exit code ${install_rc}."
     echo "Container restart is caused by restart policy after this bootstrap failure."
     exit "${install_rc}"
   fi
-
-  cleanup_dump_cache_if_ready
 
   bootstrap_completed=true
   persist_python_modules_to_cache
