@@ -10,6 +10,7 @@ CUSTOM_PARAMETERS=${CUSTOM_PARAMETERS:-}
 IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
 TELEMETRY=${TELEMETRY:-true}
 DUMP=${DUMP:-false}
+DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS:-1}
 MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
 TON_DB_DIR=/var/ton-work/db
@@ -54,6 +55,7 @@ echo
 echo TON_BRANCH $TON_BRANCH
 echo IGNORE_MINIMAL_REQS $IGNORE_MINIMAL_REQS
 echo DUMP $DUMP
+echo DUMP_EXTRACT_THREADS $DUMP_EXTRACT_THREADS
 echo MYTONCTRL_VERSION $MYTONCTRL_VERSION
 echo GLOBAL_CONFIG_URL $GLOBAL_CONFIG_URL
 echo ARCHIVE_BLOCKS $ARCHIVE_BLOCKS
@@ -250,6 +252,42 @@ resolve_install_dump_arg() {
   INSTALL_DUMP_ARG="-d"
 }
 
+configure_dump_extract_threads() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if ! [[ "${DUMP_EXTRACT_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}; expected positive integer."
+    exit 2
+  fi
+
+  if [ "${DUMP_EXTRACT_THREADS}" = "8" ]; then
+    return
+  fi
+
+  if [ ! -x /usr/bin/plzip ]; then
+    return
+  fi
+
+  cat > /usr/local/bin/plzip <<'EOF'
+#!/bin/bash
+set -e
+threads="${DUMP_EXTRACT_THREADS:-1}"
+args=()
+for arg in "$@"; do
+  if [[ "$arg" =~ ^-n[0-9]+$ ]]; then
+    args+=("-n${threads}")
+  else
+    args+=("$arg")
+  fi
+done
+exec /usr/bin/plzip "${args[@]}"
+EOF
+  chmod +x /usr/local/bin/plzip
+  echo "Configured plzip wrapper to use DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}"
+}
+
 dump_download_artifacts_present() {
   [ -f "${DUMP_DOWNLOAD_FILE}" ] || [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]
 }
@@ -276,6 +314,29 @@ dump_download_failed_in_log() {
   [ -f "${INSTALL_LOG_FILE}" ] && grep -q "Dump download failed" "${INSTALL_LOG_FILE}"
 }
 
+dump_extraction_failed_in_log() {
+  [ -f "${INSTALL_LOG_FILE}" ] && grep -Eq "Dump extraction failed|Data error in worker|Unexpected EOF in archive|tar: Error is not recoverable" "${INSTALL_LOG_FILE}"
+}
+
+clear_partial_dump_bootstrap_state() {
+  echo "Clearing partial dump/bootstrap state before retry."
+  rm -f "${MTC_DONE_FILE}" 2>/dev/null || true
+  rm -f "${TON_DB_DIR}/config.json" 2>/dev/null || true
+  rm -rf "${SYSTEMD_UNITS_DIR}" 2>/dev/null || true
+
+  # A failed tar extraction can leave corrupt partial TON DB payload behind.
+  rm -rf \
+    "${TON_DB_DIR}/archive" \
+    "${TON_DB_DIR}/celldb" \
+    "${TON_DB_DIR}/files" \
+    "${TON_DB_DIR}/state" \
+    "${TON_DB_DIR}/keyring" \
+    "${TON_DB_DIR}/error" \
+    2>/dev/null || true
+
+  find "${TON_DB_DIR}" -maxdepth 1 -type f \( -name "*.tar.lz" -o -name "*.tar.lz.aria2" -o -name "latest.tar.lz" -o -name "latest.tar.lz.aria2" \) -delete 2>/dev/null || true
+}
+
 fail_if_dump_download_incomplete() {
   if [ "${DUMP}" != true ]; then
     return
@@ -287,6 +348,18 @@ fail_if_dump_download_incomplete() {
     fi
     clear_validator_config_for_dump_retry
     echo "Dump download did not finish; leaving bootstrap incomplete so the next pod start resumes it."
+    exit 1
+  fi
+}
+
+fail_if_dump_extraction_failed() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if dump_extraction_failed_in_log; then
+    clear_partial_dump_bootstrap_state
+    echo "Dump extraction failed; leaving bootstrap incomplete so the next pod start retries from a clean state."
     exit 1
   fi
 }
@@ -505,6 +578,7 @@ first_install=false
 bootstrap_completed=false
 
 restore_python_modules_from_cache
+configure_dump_extract_threads
 prepare_bootstrap_marker_state
 normalize_ton_permissions
 force_dump_download_retry_if_needed
@@ -543,6 +617,7 @@ if [ "${first_install}" = true ]; then
   install_rc=${PIPESTATUS[0]}
   set -e
   fail_if_dump_download_incomplete
+  fail_if_dump_extraction_failed
 
   if [ "${install_rc}" -ne 0 ]; then
     echo "MyTonCtrl installer failed with exit code ${install_rc}."
