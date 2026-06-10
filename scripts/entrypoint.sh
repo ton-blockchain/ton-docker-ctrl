@@ -11,6 +11,10 @@ IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
 TELEMETRY=${TELEMETRY:-true}
 DUMP=${DUMP:-false}
 DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS:-1}
+DUMP_DEBUG=${DUMP_DEBUG:-true}
+DUMP_VALIDATE_BEFORE_EXTRACT=${DUMP_VALIDATE_BEFORE_EXTRACT:-true}
+DUMP_DEBUG_SHA256=${DUMP_DEBUG_SHA256:-false}
+DUMP_KEEP_FAILED_ARCHIVE=${DUMP_KEEP_FAILED_ARCHIVE:-false}
 MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
 TON_DB_DIR=/var/ton-work/db
@@ -56,6 +60,10 @@ echo TON_BRANCH $TON_BRANCH
 echo IGNORE_MINIMAL_REQS $IGNORE_MINIMAL_REQS
 echo DUMP $DUMP
 echo DUMP_EXTRACT_THREADS $DUMP_EXTRACT_THREADS
+echo DUMP_DEBUG $DUMP_DEBUG
+echo DUMP_VALIDATE_BEFORE_EXTRACT $DUMP_VALIDATE_BEFORE_EXTRACT
+echo DUMP_DEBUG_SHA256 $DUMP_DEBUG_SHA256
+echo DUMP_KEEP_FAILED_ARCHIVE $DUMP_KEEP_FAILED_ARCHIVE
 echo MYTONCTRL_VERSION $MYTONCTRL_VERSION
 echo GLOBAL_CONFIG_URL $GLOBAL_CONFIG_URL
 echo ARCHIVE_BLOCKS $ARCHIVE_BLOCKS
@@ -288,6 +296,51 @@ EOF
   echo "Configured plzip wrapper to use DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}"
 }
 
+patch_mytonctrl_install_script() {
+  local install_script="$1"
+
+  if [ "${DUMP}" != true ] || [ "${DUMP_DEBUG}" != true ]; then
+    return
+  fi
+
+  if [ ! -x /scripts/mytonctrl_dump_debug_patch.py ]; then
+    echo "Dump debug patch requested but /scripts/mytonctrl_dump_debug_patch.py is missing or not executable."
+    exit 1
+  fi
+
+  python3 - "${install_script}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+marker = "# ton-docker-ctrl dump debug patch"
+if marker in text:
+    sys.exit(0)
+
+insert = """\
+
+# ton-docker-ctrl dump debug patch
+if [ -x /scripts/mytonctrl_dump_debug_patch.py ]; then
+    python3 /scripts/mytonctrl_dump_debug_patch.py
+fi
+"""
+
+needle = "pip3 install -U .  # TODO: make installation from git directly\n"
+if needle in text:
+    text = text.replace(needle, needle + insert, 1)
+else:
+    fallback = "python3 -m mytoninstaller "
+    index = text.find(fallback)
+    if index == -1:
+        raise SystemExit("failed to locate MyTonCtrl installer hook point")
+    text = text[:index] + insert + text[index:]
+
+path.write_text(text)
+PY
+  echo "Enabled MyTonCtrl dump diagnostics in ${install_script}"
+}
+
 dump_download_artifacts_present() {
   [ -f "${DUMP_DOWNLOAD_FILE}" ] || [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]
 }
@@ -334,7 +387,11 @@ clear_partial_dump_bootstrap_state() {
     "${TON_DB_DIR}/error" \
     2>/dev/null || true
 
-  find "${TON_DB_DIR}" -maxdepth 1 -type f \( -name "*.tar.lz" -o -name "*.tar.lz.aria2" -o -name "latest.tar.lz" -o -name "latest.tar.lz.aria2" \) -delete 2>/dev/null || true
+  if [ "${DUMP_KEEP_FAILED_ARCHIVE}" = true ]; then
+    echo "Preserving dump archive artifacts because DUMP_KEEP_FAILED_ARCHIVE=true."
+  else
+    find "${TON_DB_DIR}" -maxdepth 1 -type f \( -name "*.tar.lz" -o -name "*.tar.lz.aria2" -o -name "latest.tar.lz" -o -name "latest.tar.lz.aria2" \) -delete 2>/dev/null || true
+  fi
 }
 
 fail_if_dump_download_incomplete() {
@@ -604,6 +661,7 @@ if [ "${first_install}" = true ]; then
 
   echo "Installing MyTonCtrl, version ${MYTONCTRL_VERSION}"
   wget -q https://raw.githubusercontent.com/ton-blockchain/mytonctrl/${MYTONCTRL_VERSION}/scripts/install.sh -O /tmp/install.sh
+  patch_mytonctrl_install_script /tmp/install.sh
   if [ "$TELEMETRY" = false ]; then INSTALL_TELEMETRY_ARG="-t"; else INSTALL_TELEMETRY_ARG=""; fi
   if [ "$IGNORE_MINIMAL_REQS" = true ]; then INSTALL_IGNORE_MINIMAL_REQS_ARG="-i"; else INSTALL_IGNORE_MINIMAL_REQS_ARG=""; fi
   resolve_install_dump_arg

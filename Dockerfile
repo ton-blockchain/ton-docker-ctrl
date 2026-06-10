@@ -57,6 +57,7 @@ COPY --from=ton /usr/local/bin/func /usr/bin/ton/crypto/
 VOLUME ["/var/ton-work", "/usr/local/bin/mytoncore"]
 
 COPY --chmod=755 scripts/entrypoint.sh/ /scripts/entrypoint.sh
+COPY --chmod=755 scripts/mytonctrl_dump_debug_patch.py /scripts/mytonctrl_dump_debug_patch.py
 
 RUN echo 'alias getstats="/usr/bin/ton/validator-engine-console/validator-engine-console -k /var/ton-work/keys/client -p /var/ton-work/keys/server.pub -a $(hostname -I | tr -d " "):$(jq .control[].port <<< cat /var/ton-work/db/config.json) -c getstats"' >> ~/.bashrc
 RUN echo 'alias last="/usr/bin/ton/lite-client/lite-client -p /var/ton-work/keys/liteserver.pub -a $(hostname -I | tr -d " "):$(jq .liteservers[].port <<< cat /var/ton-work/db/config.json) -t 3 -c last"' >> ~/.bashrc
