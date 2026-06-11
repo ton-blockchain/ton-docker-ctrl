@@ -32,6 +32,13 @@ VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
 MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
+BOOTSTRAP_TRANSACTION_MARKER=/var/ton-work/.bootstrap-transaction-active
+BOOTSTRAP_ROLLBACK_BASENAME=.bootstrap-rollback
+BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME=.bootstrap-systemd-rollback
+BOOTSTRAP_ROOT_METADATA_FILE=.bootstrap-root-metadata
+TON_WORK_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_ROLLBACK_BASENAME}
+MYTONCORE_ROLLBACK_DIR=/usr/local/bin/mytoncore/${BOOTSTRAP_ROLLBACK_BASENAME}
+BOOTSTRAP_SYSTEMD_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
@@ -175,11 +182,201 @@ persist_service_units() {
 }
 
 prepare_bootstrap_marker_state() {
+  if [ ! -f "${MTC_DONE_FILE}" ]; then
+    return
+  fi
+
   restore_service_units
 
   if [ -f "${MTC_DONE_FILE}" ] && ! systemd_units_available && ! systemd_units_cached; then
     echo "Detected ${MTC_DONE_FILE} but no persisted systemd unit files; forcing one bootstrap run."
     rm -f "${MTC_DONE_FILE}" || true
+  fi
+}
+
+copy_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+
+  mkdir -p "${volume_root}"
+  rm -rf "${snapshot_dir}"
+  mkdir -p "${snapshot_dir}"
+  stat -c '%u %g %a' "${volume_root}" > "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}"
+
+  find "${volume_root}" -mindepth 1 -maxdepth 1 \
+    ! -name "${BOOTSTRAP_ROLLBACK_BASENAME}" \
+    ! -name "${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}" \
+    ! -name "$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")" \
+    -exec cp -a -t "${snapshot_dir}" -- {} +
+}
+
+clear_volume_current_state() {
+  local volume_root="$1"
+
+  mkdir -p "${volume_root}"
+
+  find "${volume_root}" -mindepth 1 -maxdepth 1 \
+    ! -name "${BOOTSTRAP_ROLLBACK_BASENAME}" \
+    ! -name "${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}" \
+    ! -name "$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")" \
+    -exec rm -rf -- {} +
+}
+
+restore_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+  local owner_uid
+  local owner_gid
+  local root_mode
+
+  if [ ! -d "${snapshot_dir}" ]; then
+    echo "ERROR: bootstrap rollback snapshot is missing: ${snapshot_dir}"
+    return 1
+  fi
+
+  clear_volume_current_state "${volume_root}"
+
+  find "${snapshot_dir}" -mindepth 1 -maxdepth 1 \
+    ! -name "${BOOTSTRAP_ROOT_METADATA_FILE}" \
+    -exec cp -a -t "${volume_root}" -- {} +
+
+  if [ -f "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}" ]; then
+    read -r owner_uid owner_gid root_mode < "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}"
+    chown "${owner_uid}:${owner_gid}" "${volume_root}" 2>/dev/null || true
+    chmod "${root_mode}" "${volume_root}" 2>/dev/null || true
+  fi
+}
+
+snapshot_systemd_unit_files() {
+  local service_path
+  local service_name
+
+  rm -rf "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}"
+  mkdir -p "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}"
+
+  for service_path in "${VALIDATOR_SERVICE}" "${MYTONCORE_SERVICE}"; do
+    service_name=$(basename "${service_path}")
+
+    if [ -e "${service_path}" ]; then
+      cp -a "${service_path}" "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}"
+    else
+      touch "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}.absent"
+    fi
+  done
+}
+
+restore_systemd_unit_files_snapshot() {
+  local service_path
+  local service_name
+
+  if [ ! -d "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}" ]; then
+    return
+  fi
+
+  for service_path in "${VALIDATOR_SERVICE}" "${MYTONCORE_SERVICE}"; do
+    service_name=$(basename "${service_path}")
+
+    if [ -e "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}" ]; then
+      cp -a "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}" "${service_path}"
+    elif [ -e "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}.absent" ]; then
+      rm -f "${service_path}"
+    fi
+  done
+}
+
+cleanup_bootstrap_transaction_snapshots() {
+  rm -rf \
+    "${TON_WORK_ROLLBACK_DIR}" \
+    "${MYTONCORE_ROLLBACK_DIR}" \
+    "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}" \
+    "${BOOTSTRAP_TRANSACTION_MARKER}" \
+    2>/dev/null || true
+}
+
+rollback_bootstrap_transaction() {
+  echo "Rolling back incomplete MyTonCtrl bootstrap transaction."
+
+  restore_systemd_unit_files_snapshot
+  restore_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
+  restore_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+
+  rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
+  cleanup_bootstrap_transaction_snapshots
+  bootstrap_transaction_active=false
+}
+
+recover_interrupted_bootstrap_transaction() {
+  if [ -f "${BOOTSTRAP_TRANSACTION_MARKER}" ]; then
+    echo "Detected interrupted MyTonCtrl bootstrap transaction from a previous start."
+    rollback_bootstrap_transaction
+  else
+    cleanup_bootstrap_transaction_snapshots
+  fi
+}
+
+begin_bootstrap_transaction() {
+  echo "Starting atomic MyTonCtrl bootstrap transaction."
+
+  cleanup_bootstrap_transaction_snapshots
+  copy_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
+  copy_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+  snapshot_systemd_unit_files
+
+  {
+    echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "pid=$$"
+  } > "${BOOTSTRAP_TRANSACTION_MARKER}"
+
+  bootstrap_transaction_active=true
+}
+
+commit_bootstrap_transaction() {
+  if [ "${bootstrap_transaction_active}" != true ]; then
+    return
+  fi
+
+  echo "Committing atomic MyTonCtrl bootstrap transaction."
+
+  bootstrap_transaction_active=false
+  rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
+  cleanup_bootstrap_transaction_snapshots
+}
+
+rollback_bootstrap_transaction_on_exit() {
+  local exit_code=$?
+
+  if [ "${bootstrap_transaction_active}" = true ]; then
+    echo "MyTonCtrl bootstrap did not reach commit point; rolling back persistent state."
+    rollback_bootstrap_transaction
+  fi
+
+  return "${exit_code}"
+}
+
+validate_bootstrap_commit_ready() {
+  local missing=false
+  local required_service_file
+
+  if [ ! -f "${MTC_DONE_FILE}" ]; then
+    echo "Required bootstrap marker is missing: ${MTC_DONE_FILE}"
+    missing=true
+  fi
+
+  for required_service_file in \
+    "${VALIDATOR_SERVICE}" \
+    "${MYTONCORE_SERVICE}" \
+    "${VALIDATOR_SERVICE_CACHE}" \
+    "${MYTONCORE_SERVICE_CACHE}" \
+    "${VALIDATOR_SERVICE_FALLBACK_CACHE}" \
+    "${MYTONCORE_SERVICE_FALLBACK_CACHE}"; do
+    if ! service_file_present "${required_service_file}"; then
+      echo "Required bootstrap service file is missing or empty: ${required_service_file}"
+      missing=true
+    fi
+  done
+
+  if [ "${missing}" = true ]; then
+    return 1
   fi
 }
 
@@ -401,7 +598,12 @@ fail_if_dump_download_incomplete() {
 
   if dump_download_artifacts_present || dump_download_failed_in_log; then
     if dump_download_artifacts_present; then
-      echo "Detected incomplete dump download artifacts; preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+      echo "Detected incomplete dump download artifacts."
+      if [ "${bootstrap_transaction_active}" = true ]; then
+        echo "Atomic bootstrap rollback will discard artifacts created by this attempt."
+      else
+        echo "Preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+      fi
     fi
     clear_validator_config_for_dump_retry
     echo "Dump download did not finish; leaving bootstrap incomplete so the next pod start resumes it."
@@ -633,19 +835,27 @@ apply_service_overrides() {
 
 first_install=false
 bootstrap_completed=false
+bootstrap_transaction_active=false
 
-restore_python_modules_from_cache
+trap rollback_bootstrap_transaction_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+recover_interrupted_bootstrap_transaction
 configure_dump_extract_threads
 prepare_bootstrap_marker_state
-normalize_ton_permissions
-force_dump_download_retry_if_needed
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
   echo "MyTonCtrl bootstrap required: ${MTC_DONE_FILE} not found"
+  begin_bootstrap_transaction
 else
   echo "MyTonCtrl already installed"
 fi
+
+restore_python_modules_from_cache
+normalize_ton_permissions
+force_dump_download_retry_if_needed
 
 if [ "${first_install}" = true ]; then
 
@@ -703,6 +913,9 @@ normalize_ton_permissions
 
 if [ "${bootstrap_completed}" = true ]; then
   touch "${MTC_DONE_FILE}"
+  chown validator:validator "${MTC_DONE_FILE}" 2>/dev/null || true
+  validate_bootstrap_commit_ready
+  commit_bootstrap_transaction
 fi
 
 if ! run_systemctl daemon-reload; then
