@@ -199,29 +199,55 @@ prepare_bootstrap_marker_state() {
 copy_volume_snapshot() {
   local volume_root="$1"
   local snapshot_dir="$2"
+  local child_path
+  local child_name
 
   mkdir -p "${volume_root}"
   rm -rf "${snapshot_dir}"
   mkdir -p "${snapshot_dir}"
   stat -c '%u %g %a' "${volume_root}" > "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}"
 
-  find "${volume_root}" -mindepth 1 -maxdepth 1 \
-    ! -name "${BOOTSTRAP_ROLLBACK_BASENAME}" \
-    ! -name "${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}" \
-    ! -name "$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")" \
-    -exec cp -a -t "${snapshot_dir}" -- {} +
+  while IFS= read -r -d '' child_path; do
+    child_name=$(basename "${child_path}")
+    case "${child_name}" in
+      "${BOOTSTRAP_ROLLBACK_BASENAME}"|"${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}"|"$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")")
+        continue
+        ;;
+    esac
+
+    if mountpoint -q "${child_path}" 2>/dev/null; then
+      echo "Skipping mounted path during bootstrap snapshot: ${child_path}"
+      continue
+    fi
+
+    cp -a "${child_path}" "${snapshot_dir}/"
+  done < <(find "${volume_root}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 clear_volume_current_state() {
   local volume_root="$1"
+  local child_path
+  local child_name
 
   mkdir -p "${volume_root}"
 
-  find "${volume_root}" -mindepth 1 -maxdepth 1 \
-    ! -name "${BOOTSTRAP_ROLLBACK_BASENAME}" \
-    ! -name "${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}" \
-    ! -name "$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")" \
-    -exec rm -rf -- {} +
+  while IFS= read -r -d '' child_path; do
+    child_name=$(basename "${child_path}")
+    case "${child_name}" in
+      "${BOOTSTRAP_ROLLBACK_BASENAME}"|"${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}"|"$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")")
+        continue
+        ;;
+    esac
+
+    if mountpoint -q "${child_path}" 2>/dev/null; then
+      echo "Skipping mounted path during bootstrap rollback cleanup: ${child_path}"
+      continue
+    fi
+
+    if ! rm -rf -- "${child_path}"; then
+      echo "WARNING: failed to remove ${child_path} during bootstrap rollback cleanup; continuing."
+    fi
+  done < <(find "${volume_root}" -mindepth 1 -maxdepth 1 -print0)
 }
 
 restore_volume_snapshot() {
@@ -596,8 +622,7 @@ clear_partial_dump_bootstrap_state() {
 legacy_partial_bootstrap_state_present() {
   [ -e "${TON_DB_DIR}/config.json" ] ||
     [ -e "${MYTONCORE_DB_FILE}" ] ||
-    [ -e "${MYTONCORE_DB_DB_FILE}" ] ||
-    [ -e /var/ton-work/keys ]
+    [ -e "${MYTONCORE_DB_DB_FILE}" ]
 }
 
 move_path_to_backup_dir() {
@@ -638,7 +663,6 @@ clear_legacy_partial_bootstrap_state() {
   echo "Moving first-setup blockers aside so bootstrap can run DownloadDump."
 
   move_path_to_backup_dir "${TON_DB_DIR}/config.json" "${ton_backup_dir}"
-  move_path_to_backup_dir /var/ton-work/keys "${ton_backup_dir}"
 
   for mytoncore_db_path in /usr/local/bin/mytoncore/mytoncore.db*; do
     move_path_to_backup_dir "${mytoncore_db_path}" "${mytoncore_backup_dir}"
