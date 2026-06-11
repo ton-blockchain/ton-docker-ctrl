@@ -604,7 +604,7 @@ move_path_to_backup_dir() {
   local source_path="$1"
   local backup_dir="$2"
 
-  [ -e "${source_path}" ] || return
+  [ -e "${source_path}" ] || return 0
 
   mkdir -p "${backup_dir}"
   mv "${source_path}" "${backup_dir}/"
@@ -904,12 +904,12 @@ trap 'exit 143' TERM
 recover_interrupted_bootstrap_transaction
 configure_dump_extract_threads
 prepare_bootstrap_marker_state
-clear_legacy_partial_bootstrap_state
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
   echo "MyTonCtrl bootstrap required: ${MTC_DONE_FILE} not found"
   begin_bootstrap_transaction
+  clear_legacy_partial_bootstrap_state
 else
   echo "MyTonCtrl already installed"
 fi
