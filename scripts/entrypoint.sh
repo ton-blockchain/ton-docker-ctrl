@@ -39,6 +39,8 @@ BOOTSTRAP_ROOT_METADATA_FILE=.bootstrap-root-metadata
 TON_WORK_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_ROLLBACK_BASENAME}
 MYTONCORE_ROLLBACK_DIR=/usr/local/bin/mytoncore/${BOOTSTRAP_ROLLBACK_BASENAME}
 BOOTSTRAP_SYSTEMD_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}
+MYTONCORE_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db
+MYTONCORE_DB_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db.db
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
@@ -591,6 +593,64 @@ clear_partial_dump_bootstrap_state() {
   fi
 }
 
+legacy_partial_bootstrap_state_present() {
+  [ -e "${TON_DB_DIR}/config.json" ] ||
+    [ -e "${MYTONCORE_DB_FILE}" ] ||
+    [ -e "${MYTONCORE_DB_DB_FILE}" ] ||
+    [ -e /var/ton-work/keys ]
+}
+
+move_path_to_backup_dir() {
+  local source_path="$1"
+  local backup_dir="$2"
+
+  [ -e "${source_path}" ] || return
+
+  mkdir -p "${backup_dir}"
+  mv "${source_path}" "${backup_dir}/"
+}
+
+clear_legacy_partial_bootstrap_state() {
+  local backup_suffix
+  local ton_backup_dir
+  local mytoncore_backup_dir
+  local mytoncore_db_path
+
+  if [ -f "${MTC_DONE_FILE}" ]; then
+    return
+  fi
+
+  restore_service_units
+
+  if systemd_units_available || systemd_units_cached; then
+    return
+  fi
+
+  if ! legacy_partial_bootstrap_state_present; then
+    return
+  fi
+
+  backup_suffix=$(date -u +%Y%m%dT%H%M%SZ)-$$
+  ton_backup_dir="${TON_DB_DIR}/legacy-partial-bootstrap-${backup_suffix}"
+  mytoncore_backup_dir="/usr/local/bin/mytoncore/legacy-partial-bootstrap-${backup_suffix}"
+
+  echo "Detected legacy partial MyTonCtrl bootstrap state without ${MTC_DONE_FILE} or persisted systemd units."
+  echo "Moving first-setup blockers aside so bootstrap can run DownloadDump."
+
+  move_path_to_backup_dir "${TON_DB_DIR}/config.json" "${ton_backup_dir}"
+  move_path_to_backup_dir /var/ton-work/keys "${ton_backup_dir}"
+
+  for mytoncore_db_path in /usr/local/bin/mytoncore/mytoncore.db*; do
+    move_path_to_backup_dir "${mytoncore_db_path}" "${mytoncore_backup_dir}"
+  done
+
+  clear_partial_dump_bootstrap_state
+
+  echo "Legacy partial bootstrap backups:"
+  echo "  ${ton_backup_dir}"
+  echo "  ${mytoncore_backup_dir}"
+}
+
 fail_if_dump_download_incomplete() {
   if [ "${DUMP}" != true ]; then
     return
@@ -844,6 +904,7 @@ trap 'exit 143' TERM
 recover_interrupted_bootstrap_transaction
 configure_dump_extract_threads
 prepare_bootstrap_marker_state
+clear_legacy_partial_bootstrap_state
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
