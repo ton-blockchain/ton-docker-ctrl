@@ -3,6 +3,7 @@ FROM ghcr.io/ton-blockchain/ton:${TON_BRANCH} AS ton
 ENV DEBIAN_FRONTEND=noninteractive
 
 FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt update; \
     apt install -y --no-install-recommends \
@@ -17,7 +18,7 @@ RUN set -eux; \
         libc-bin clang-21 build-essential software-properties-common \
         gperf make cmake libblas-dev wget gcc libgsl-dev \
         python3-dev python3-pip sudo git fio iproute2 \
-        plzip pv aria2 ninja-build rocksdb-tools \
+        plzip pv aria2 ninja-build rocksdb-tools sysstat iotop \
         autoconf automake libtool iputils-ping nload jq bc xxd htop \
         libsecp256k1-dev libsodium-dev liblz4-dev libjemalloc2 libjemalloc-dev; \
     ln -sf /usr/bin/clang-21 /usr/bin/clang; \

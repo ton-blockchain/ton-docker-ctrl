@@ -523,6 +523,82 @@ EOF
   echo "Configured plzip wrapper to use DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}"
 }
 
+configure_dump_extraction_timer() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if [ ! -x /usr/bin/tar ]; then
+    return
+  fi
+
+  cat > /usr/local/bin/tar <<'EOF'
+#!/bin/bash
+set -e
+
+format_elapsed() {
+  local total_seconds="$1"
+  local hours=$((total_seconds / 3600))
+  local minutes=$(((total_seconds % 3600) / 60))
+  local seconds=$((total_seconds % 60))
+
+  if [ "${hours}" -gt 0 ]; then
+    printf '%dh %dm %ds' "${hours}" "${minutes}" "${seconds}"
+  elif [ "${minutes}" -gt 0 ]; then
+    printf '%dm %ds' "${minutes}" "${seconds}"
+  else
+    printf '%ds' "${seconds}"
+  fi
+}
+
+extract_arg=false
+dump_db_destination=false
+next_arg_is_destination=false
+
+for arg in "$@"; do
+  if [ "${next_arg_is_destination}" = true ]; then
+    if [ "${arg%/}" = "/var/ton-work/db" ]; then
+      dump_db_destination=true
+    fi
+    next_arg_is_destination=false
+  fi
+
+  case "${arg}" in
+    --extract|-[!-]*x*|-x*)
+      extract_arg=true
+      ;;
+    -C|--directory)
+      next_arg_is_destination=true
+      ;;
+    -C/var/ton-work/db|-C/var/ton-work/db/|--directory=/var/ton-work/db|--directory=/var/ton-work/db/)
+      dump_db_destination=true
+      ;;
+  esac
+done
+
+if [ "${extract_arg}" = true ] && [ "${dump_db_destination}" = true ]; then
+  started_at=$(date +%s)
+  set +e
+  /usr/bin/tar "$@"
+  tar_rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started_at ))
+
+  if [ "${tar_rc}" -eq 0 ]; then
+    echo "Dump extraction completed in $(format_elapsed "${elapsed}")"
+  else
+    echo "Dump extraction failed after $(format_elapsed "${elapsed}")"
+  fi
+
+  exit "${tar_rc}"
+fi
+
+exec /usr/bin/tar "$@"
+EOF
+  chmod +x /usr/local/bin/tar
+  echo "Configured dump extraction timer for /var/ton-work/db"
+}
+
 dump_download_artifacts_present() {
   local dump_artifact_dir
 
@@ -901,6 +977,7 @@ trap 'exit 143' TERM
 
 recover_interrupted_bootstrap_transaction
 configure_dump_extract_threads
+configure_dump_extraction_timer
 prepare_bootstrap_marker_state
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
