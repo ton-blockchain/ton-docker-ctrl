@@ -18,6 +18,7 @@ services:
       - mytoncore:/usr/local/bin/mytoncore
     environment:
       TON_BRANCH: ${TON_BRANCH}
+      NETWORK: ${NETWORK:-mainnet}
       GLOBAL_CONFIG_URL: ${GLOBAL_CONFIG_URL}
       IGNORE_MINIMAL_REQS: ${IGNORE_MINIMAL_REQS}
       MYTONCTRL_VERSION: ${MYTONCTRL_VERSION}

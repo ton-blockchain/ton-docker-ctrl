@@ -2,6 +2,7 @@
 set -e
 
 TON_BRANCH=${TON_BRANCH:-latest}
+NETWORK=${NETWORK:-mainnet}
 GLOBAL_CONFIG_URL=${GLOBAL_CONFIG_URL:-https://ton.org/global.config.json}
 ARCHIVE_TTL=${ARCHIVE_TTL:-86400}
 STATE_TTL=${STATE_TTL:-86400}
@@ -67,6 +68,7 @@ MYTONCTRL_PYTHON_PATTERNS=(
 echo "Started with environment variables:"
 echo
 echo TON_BRANCH $TON_BRANCH
+echo NETWORK $NETWORK
 echo IGNORE_MINIMAL_REQS $IGNORE_MINIMAL_REQS
 echo DUMP $DUMP
 echo DUMP_EXTRACT_THREADS $DUMP_EXTRACT_THREADS
@@ -87,6 +89,15 @@ echo PUBLIC_IP $PUBLIC_IP
 echo VALIDATOR_PORT $VALIDATOR_PORT
 echo LITESERVER_PORT $LITESERVER_PORT
 echo VALIDATOR_CONSOLE_PORT $VALIDATOR_CONSOLE_PORT
+
+case "${NETWORK}" in
+  mainnet|testnet)
+    ;;
+  *)
+    echo "Invalid NETWORK=${NETWORK}; expected mainnet or testnet."
+    exit 2
+    ;;
+esac
 
 # check machine configuration
 echo
@@ -1010,7 +1021,7 @@ if [ "${first_install}" = true ]; then
   if [ "$TELEMETRY" = false ]; then INSTALL_TELEMETRY_ARG="-t"; else INSTALL_TELEMETRY_ARG=""; fi
   if [ "$IGNORE_MINIMAL_REQS" = true ]; then INSTALL_IGNORE_MINIMAL_REQS_ARG="-i"; else INSTALL_IGNORE_MINIMAL_REQS_ARG=""; fi
   resolve_install_dump_arg
-  if [ "$TON_BRANCH" != "latest" ]; then INSTALL_NETWORK_ARG="-n testnet"; else INSTALL_NETWORK_ARG=""; fi
+  INSTALL_NETWORK_ARG="-n ${NETWORK}"
   echo
   echo /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   echo

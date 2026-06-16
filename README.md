@@ -13,6 +13,7 @@ To run, you need docker-ce, docker-buildx-plugin:
 Build environment variables are configured in the `.env `file:
 
 * **TON_BRANCH** - when building this image you can specify which TON branch binaries will be based on. Actually it is a TAG name of TON Docker image, but it coincides with the branch name (default: **latest**, i.e. master branch)
+* **NETWORK** - TON network passed to MyTonCtrl installer. Valid values are `mainnet` or `testnet` (default **mainnet**)
 * **GLOBAL_CONFIG_URL** - URL of the TON blockchain configuration (default: [Mainnet](https://ton.org/global.config.json))
 * **MYTONCTRL_VERSION** - MyTonCtrl build branch (default **master**)
 * **TELEMETRY** - Enable/Disable telemetry (default **true**)
@@ -58,6 +59,7 @@ After setting `PUBLIC_IP` and other parameters, you are ready to start the **MAI
 To run **TESTNET** node, additionally change this in `.env`:
 ```bash
 TON_BRANCH=testnet
+NETWORK=testnet
 GLOBAL_CONFIG_URL=https://ton.org/testnet-global.config.json
 ```
 
