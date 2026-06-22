@@ -55,7 +55,7 @@ COPY --from=ton /usr/local/bin/generate-random-id /usr/bin/ton/utils/
 COPY --from=ton /usr/local/bin/fift /usr/bin/ton/crypto/
 COPY --from=ton /usr/local/bin/func /usr/bin/ton/crypto/
 
-VOLUME ["/var/ton-work", "/usr/local/bin/mytoncore"]
+VOLUME ["/var/ton-work", "/usr/local/bin/mytoncore", "/usr/src/ton"]
 
 COPY --chmod=755 scripts/entrypoint.sh/ /scripts/entrypoint.sh
 

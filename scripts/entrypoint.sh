@@ -488,6 +488,38 @@ EOF
   echo "Restored ${MYTONCTRL_CLI_FILE}"
 }
 
+resolve_ton_source_branch() {
+  if [ "$TON_BRANCH" == "latest" ]; then
+    echo "master"
+  else
+    echo "$TON_BRANCH"
+  fi
+}
+
+ensure_ton_sources() {
+  local branch="$1"
+
+  if [ -f /usr/src/ton/crypto/fift/lib/Fift.fif ] && [ -f /usr/src/ton/crypto/smartcont/wallet.fif ]; then
+    return
+  fi
+
+  echo "TON source tree is missing Fift files; fetching ${branch} into /usr/src/ton"
+  mkdir -p /usr/src/ton
+  cd /usr/src/ton
+
+  if [ ! -d .git ]; then
+    git init
+    git remote add origin https://github.com/ton-blockchain/ton.git
+  elif ! git remote get-url origin >/dev/null 2>&1; then
+    git remote add origin https://github.com/ton-blockchain/ton.git
+  fi
+
+  git fetch origin "$branch"
+  git checkout -B "$branch" FETCH_HEAD
+  git reset --hard FETCH_HEAD
+  git clean -fdx
+}
+
 resolve_install_dump_arg() {
   INSTALL_DUMP_ARG=""
 
@@ -1004,17 +1036,10 @@ restore_python_modules_from_cache
 normalize_ton_permissions
 force_dump_download_retry_if_needed
 
-if [ "${first_install}" = true ]; then
+branch=$(resolve_ton_source_branch)
+ensure_ton_sources "$branch"
 
-  if [ "$TON_BRANCH" == "latest" ]; then
-    branch="master"
-  else
-    branch="$TON_BRANCH"
-  fi
-  cd /usr/src/ton
-  git checkout -B $branch
-  rm -rf *
-  git pull origin $branch
+if [ "${first_install}" = true ]; then
 
   echo "Installing MyTonCtrl, version ${MYTONCTRL_VERSION}"
   wget -q https://raw.githubusercontent.com/ton-blockchain/mytonctrl/${MYTONCTRL_VERSION}/scripts/install.sh -O /tmp/install.sh

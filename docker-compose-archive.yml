@@ -11,6 +11,7 @@ services:
     volumes:
       - ton:/var/ton-work
       - mytoncore:/usr/local/bin/mytoncore
+      - ton-src:/usr/src/ton
     environment:
       TON_BRANCH: ${TON_BRANCH}
       NETWORK: ${NETWORK:-mainnet}
@@ -51,3 +52,10 @@ volumes:
       type: none
       o: bind
       device: /mnt/ton/mtc
+  ton-src:
+    name: ton-src
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/ton/src
