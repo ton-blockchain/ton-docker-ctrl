@@ -36,8 +36,8 @@ Build environment variables are configured in the `.env `file:
 This is the simplest and the quickest way to set up and start the TON validator.
 It will use a historical dump of data to speed up the initial sync process.
 It will not start validation unless you top up the wallet.
-Below docker compose commands will create two docker volumes `ton-work` and `mytoncore`. 
-The first one will contain the blockchain data, and the second - MyTonCtrl settings and most importantly, wallets' data.
+Below docker compose commands will create Docker volumes `ton-work`, `mytoncore`, `mytonctrl`, and `ton-src`.
+`ton-work` contains blockchain data, `mytoncore` contains MyTonCtrl settings and wallet data, `mytonctrl` contains files written under `/usr/local/bin/mytonctrl`, and `ton-src` contains the TON source checkout used by Fift/MyTonCtrl.
 Real paths of these volumes can be found using `docker volume inspect <volume-name>` command.
 
 We recommend changing default Docker volumes' location, since the blockchain's data can grow rapidly, 
@@ -72,6 +72,8 @@ or Docker only way:
 ```bash
 docker volume create ton-work
 docker volume create mytoncore
+docker volume create mytonctrl
+docker volume create ton-src
 
 docker run -d --name ton-node \
         --env-file .env \
@@ -79,6 +81,8 @@ docker run -d --name ton-node \
         -p "0.0.0.0:30003:30003/tcp" \
         -v ton-work:/var/ton-work \
         -v mytoncore:/usr/local/bin/mytoncore \
+        -v mytonctrl:/usr/local/bin/mytonctrl \
+        -v ton-src:/usr/src/ton \
         --restart unless-stopped \
         -it ghcr.io/ton-blockchain/ton-docker-ctrl:testnet
 ```
@@ -119,7 +123,19 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /path/to/mtc_data 
+      device: /path/to/mytoncore_data 
+  mytonctrl:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /path/to/mytonctrl_data
+  ton-src:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /path/to/ton_src
 ```
 
 Remember to set `PUBLIC_IP` in `.env`. Start the archive node:
@@ -198,6 +214,8 @@ docker run -it --entrypoint=bash ghcr.io/ton-blockchain/ton-docker-ctrl:latest
 docker volume ls
 docker volume inspect ton-work
 docker volume inspect mytoncore
+docker volume inspect mytonctrl
+docker volume inspect ton-src
 ```
 
 ## Uninstall the TON node
@@ -205,5 +223,5 @@ The TON dblockchain data will be deleted, as well as MyTonCtrl settings and **wa
 ```bash
 docker stop ton-node
 docker rm ton-node
-docker volume rm mytoncore ton-work
+docker volume rm mytonctrl mytoncore ton-src ton-work
 ```

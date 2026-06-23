@@ -11,6 +11,7 @@ services:
     volumes:
       - ton:/var/ton-work
       - mytoncore:/usr/local/bin/mytoncore
+      - mytonctrl:/usr/local/bin/mytonctrl
       - ton-src:/usr/src/ton
     environment:
       TON_BRANCH: ${TON_BRANCH}
@@ -41,5 +42,7 @@ volumes:
     name: ton-work
   mytoncore:
     name: mytoncore
+  mytonctrl:
+    name: mytonctrl
   ton-src:
     name: ton-src

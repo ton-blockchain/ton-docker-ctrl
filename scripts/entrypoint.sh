@@ -34,6 +34,7 @@ SYSTEMD_UNITS_FALLBACK_DIR=/usr/local/bin/mytoncore/systemd-units
 VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
 MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
+MYTONCTRL_DIR=/usr/local/bin/mytonctrl
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
 BOOTSTRAP_TRANSACTION_MARKER=/var/ton-work/.bootstrap-transaction-active
 BOOTSTRAP_ROLLBACK_BASENAME=.bootstrap-rollback
@@ -41,6 +42,7 @@ BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME=.bootstrap-systemd-rollback
 BOOTSTRAP_ROOT_METADATA_FILE=.bootstrap-root-metadata
 TON_WORK_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_ROLLBACK_BASENAME}
 MYTONCORE_ROLLBACK_DIR=/usr/local/bin/mytoncore/${BOOTSTRAP_ROLLBACK_BASENAME}
+MYTONCTRL_ROLLBACK_DIR=${MYTONCTRL_DIR}/${BOOTSTRAP_ROLLBACK_BASENAME}
 BOOTSTRAP_SYSTEMD_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}
 MYTONCORE_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db
 MYTONCORE_DB_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db.db
@@ -149,7 +151,7 @@ bootstrap_state_complete_without_marker() {
 }
 
 normalize_ton_permissions() {
-  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets
+  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets "${MYTONCTRL_DIR}"
   mkdir -p /var/ton-work/db/error 2>/dev/null || true
 
   for path in \
@@ -161,7 +163,8 @@ normalize_ton_permissions() {
     "${DUMP_CACHE_DIR}" \
     /var/ton-work/keys \
     /usr/local/bin/mytoncore \
-    /usr/local/bin/mytoncore/wallets; do
+    /usr/local/bin/mytoncore/wallets \
+    "${MYTONCTRL_DIR}"; do
     [ -e "${path}" ] || continue
     chown validator:validator "${path}" 2>/dev/null || true
   done
@@ -351,6 +354,7 @@ cleanup_bootstrap_transaction_snapshots() {
   rm -rf \
     "${TON_WORK_ROLLBACK_DIR}" \
     "${MYTONCORE_ROLLBACK_DIR}" \
+    "${MYTONCTRL_ROLLBACK_DIR}" \
     "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}" \
     "${BOOTSTRAP_TRANSACTION_MARKER}" \
     2>/dev/null || true
@@ -362,6 +366,7 @@ rollback_bootstrap_transaction() {
   restore_systemd_unit_files_snapshot
   restore_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
   restore_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+  restore_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
 
   rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
   cleanup_bootstrap_transaction_snapshots
@@ -383,6 +388,7 @@ begin_bootstrap_transaction() {
   cleanup_bootstrap_transaction_snapshots
   copy_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
   copy_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+  copy_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
   snapshot_systemd_unit_files
 
   {
