@@ -18,6 +18,7 @@ DUMP_KEEP_FAILED_ARCHIVE=${DUMP_KEEP_FAILED_ARCHIVE:-false}
 DUMP_CACHE_DIR=${DUMP_CACHE_DIR:-/var/ton-work/dump-cache}
 MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
+ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE=${ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE:-false}
 export DUMP_EXTRACT_THREADS DUMP_VALIDATE_BEFORE_EXTRACT DUMP_DEBUG_SHA256 DUMP_KEEP_FAILED_ARCHIVE DUMP_CACHE_DIR
 TON_DB_DIR=/var/ton-work/db
 MTC_DONE_FILE=${TON_DB_DIR}/mtc_done
@@ -137,6 +138,16 @@ systemd_units_cached() {
     (service_file_present "${MYTONCORE_SERVICE_CACHE}" || service_file_present "${MYTONCORE_SERVICE_FALLBACK_CACHE}")
 }
 
+mytoncore_db_present() {
+  [ -e "${MYTONCORE_DB_FILE}" ] || [ -e "${MYTONCORE_DB_DB_FILE}" ]
+}
+
+bootstrap_state_complete_without_marker() {
+  [ -s "${TON_DB_DIR}/config.json" ] &&
+    mytoncore_db_present &&
+    (systemd_units_available || systemd_units_cached)
+}
+
 normalize_ton_permissions() {
   mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets
   mkdir -p /var/ton-work/db/error 2>/dev/null || true
@@ -197,13 +208,24 @@ persist_service_units() {
 }
 
 prepare_bootstrap_marker_state() {
+  restore_service_units
+
   if [ ! -f "${MTC_DONE_FILE}" ]; then
+    if bootstrap_state_complete_without_marker; then
+      echo "Detected complete persisted MyTonCtrl state without ${MTC_DONE_FILE}; restoring marker."
+      mkdir -p "${TON_DB_DIR}"
+      touch "${MTC_DONE_FILE}"
+      chown validator:validator "${MTC_DONE_FILE}" 2>/dev/null || true
+    fi
     return
   fi
 
-  restore_service_units
-
   if [ -f "${MTC_DONE_FILE}" ] && ! systemd_units_available && ! systemd_units_cached; then
+    if mytoncore_db_present; then
+      echo "Detected ${MTC_DONE_FILE} and persisted MyTonCtrl DB, but no persisted systemd unit files."
+      echo "Keeping ${MTC_DONE_FILE} to avoid forcing bootstrap over an existing MyTonCtrl database."
+      return
+    fi
     echo "Detected ${MTC_DONE_FILE} but no persisted systemd unit files; forcing one bootstrap run."
     rm -f "${MTC_DONE_FILE}" || true
   fi
@@ -746,6 +768,13 @@ clear_legacy_partial_bootstrap_state() {
 
   if ! legacy_partial_bootstrap_state_present; then
     return
+  fi
+
+  if mytoncore_db_present && [ "${ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE}" != true ]; then
+    echo "Detected persistent MyTonCtrl DB without ${MTC_DONE_FILE} or persisted systemd units."
+    echo "Refusing to move /usr/local/bin/mytoncore/mytoncore.db* aside automatically."
+    echo "Restore ${MTC_DONE_FILE}/systemd-units from backup, or rerun with ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE=true after taking a backup."
+    exit 64
   fi
 
   backup_suffix=$(date -u +%Y%m%dT%H%M%SZ)-$$
