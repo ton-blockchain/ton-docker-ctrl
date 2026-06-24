@@ -313,6 +313,18 @@ restore_volume_snapshot() {
   fi
 }
 
+restore_optional_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+
+  if [ ! -d "${snapshot_dir}" ]; then
+    echo "Optional bootstrap rollback snapshot is missing; skipping: ${snapshot_dir}"
+    return 0
+  fi
+
+  restore_volume_snapshot "${volume_root}" "${snapshot_dir}"
+}
+
 snapshot_systemd_unit_files() {
   local service_path
   local service_name
@@ -366,7 +378,7 @@ rollback_bootstrap_transaction() {
   restore_systemd_unit_files_snapshot
   restore_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
   restore_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
-  restore_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
+  restore_optional_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
 
   rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
   cleanup_bootstrap_transaction_snapshots
