@@ -46,6 +46,7 @@ MYTONCTRL_ROLLBACK_DIR=${MYTONCTRL_DIR}/${BOOTSTRAP_ROLLBACK_BASENAME}
 BOOTSTRAP_SYSTEMD_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}
 MYTONCORE_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db
 MYTONCORE_DB_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db.db
+MYTONCORE_VENV_PYTHON=${MYTONCORE_VENV_PYTHON:-/usr/local/bin/mytoncore/venv/bin/python3}
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
@@ -510,22 +511,45 @@ persist_python_modules_to_cache() {
   fi
 }
 
+mytonctrl_python_command() {
+  local python_bin
+
+  for python_bin in \
+    "${MYTONCORE_VENV_PYTHON}" \
+    /usr/local/bin/mytoncore/venv/bin/python \
+    /usr/bin/python3 \
+    python3; do
+    if ! command -v "${python_bin}" >/dev/null 2>&1; then
+      continue
+    fi
+    if "${python_bin}" -c "import mytonctrl" >/dev/null 2>&1; then
+      printf '%s' "${python_bin}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 ensure_mytonctrl_cli() {
+  local python_bin
+
   if [ -x "${MYTONCTRL_CLI_FILE}" ]; then
     return
   fi
 
-  if ! python3 -c "import mytonctrl" >/dev/null 2>&1; then
+  python_bin="$(mytonctrl_python_command || true)"
+  if [ -z "${python_bin}" ]; then
     echo "WARNING: mytonctrl python module is missing, ${MYTONCTRL_CLI_FILE} cannot be restored."
     return
   fi
 
-  cat > "${MYTONCTRL_CLI_FILE}" <<'EOF'
+  cat > "${MYTONCTRL_CLI_FILE}" <<EOF
 #!/bin/bash
-exec /usr/bin/python3 -m mytonctrl "$@"
+exec "${python_bin}" -m mytonctrl "\$@"
 EOF
   chmod +x "${MYTONCTRL_CLI_FILE}"
-  echo "Restored ${MYTONCTRL_CLI_FILE}"
+  echo "Restored ${MYTONCTRL_CLI_FILE} using ${python_bin}"
 }
 
 resolve_ton_source_branch() {
