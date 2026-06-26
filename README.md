@@ -78,6 +78,7 @@ docker volume create ton-src
 docker run -d --name ton-node \
         --env-file .env \
         -p "0.0.0.0:30001:30001/udp" \
+        -p "0.0.0.0:30001:31001/udp" \
         -p "0.0.0.0:30003:30003/tcp" \
         -v ton-work:/var/ton-work \
         -v mytoncore:/usr/local/bin/mytoncore \
