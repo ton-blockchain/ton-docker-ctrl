@@ -21,6 +21,7 @@ MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
 ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE=${ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE:-false}
 export DUMP_EXTRACT_THREADS DUMP_VALIDATE_BEFORE_EXTRACT DUMP_DEBUG_SHA256 DUMP_KEEP_FAILED_ARCHIVE DUMP_CACHE_DIR
 TON_DB_DIR=/var/ton-work/db
+TON_SOURCE_DIR=/usr/src/ton
 MTC_DONE_FILE=${TON_DB_DIR}/mtc_done
 DUMP_DOWNLOAD_FILE=${DUMP_CACHE_DIR}/latest.tar.lz
 DUMP_ARIA2_CONTROL_FILE=${DUMP_DOWNLOAD_FILE}.aria2
@@ -152,7 +153,7 @@ bootstrap_state_complete_without_marker() {
 }
 
 normalize_ton_permissions() {
-  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets "${MYTONCTRL_DIR}"
+  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets "${MYTONCTRL_DIR}" "${TON_SOURCE_DIR}"
   mkdir -p /var/ton-work/db/error 2>/dev/null || true
 
   for path in \
@@ -173,6 +174,13 @@ normalize_ton_permissions() {
   if [ -f "${TON_DB_DIR}/config.json" ]; then
     chown validator:validator "${TON_DB_DIR}/config.json" 2>/dev/null || true
   fi
+}
+
+configure_git_safe_directories() {
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+  git config --global --add safe.directory "${TON_SOURCE_DIR}" 2>/dev/null || true
 }
 
 restore_service_units() {
@@ -563,19 +571,21 @@ resolve_ton_source_branch() {
 ensure_ton_sources() {
   local branch="$1"
 
-  if [ -f /usr/src/ton/crypto/fift/lib/Fift.fif ] && [ -f /usr/src/ton/crypto/smartcont/wallet.fif ]; then
+  if [ -f "${TON_SOURCE_DIR}/crypto/fift/lib/Fift.fif" ] && [ -f "${TON_SOURCE_DIR}/crypto/smartcont/wallet.fif" ]; then
     return
   fi
 
-  echo "TON source tree is missing Fift files; fetching ${branch} into /usr/src/ton"
-  mkdir -p /usr/src/ton
-  cd /usr/src/ton
+  echo "TON source tree is missing Fift files; fetching ${branch} into ${TON_SOURCE_DIR}"
+  mkdir -p "${TON_SOURCE_DIR}"
+  cd "${TON_SOURCE_DIR}"
 
   if [ ! -d .git ]; then
     git init
     git remote add origin https://github.com/ton-blockchain/ton.git
   elif ! git remote get-url origin >/dev/null 2>&1; then
     git remote add origin https://github.com/ton-blockchain/ton.git
+  else
+    git remote set-url origin https://github.com/ton-blockchain/ton.git
   fi
 
   git fetch origin "$branch"
@@ -1105,6 +1115,7 @@ fi
 
 restore_python_modules_from_cache
 normalize_ton_permissions
+configure_git_safe_directories
 force_dump_download_retry_if_needed
 
 branch=$(resolve_ton_source_branch)
