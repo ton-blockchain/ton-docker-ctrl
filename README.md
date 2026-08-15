@@ -12,24 +12,24 @@ To run, you need docker-ce, docker-buildx-plugin:
 ## Configuration
 Build environment variables are configured in the `.env `file:
 
-* **TON_BRANCH** - when building this image you can specify which TON branch binaries will be based on. Actually it is a TAG name of TON Docker image, but it coincides with the branch name (default: **latest**, i.e. master branch)
+* **TON_BRANCH** - when building this image, you can specify which TON branch binaries will be based on. Actually it is a TAG name of TON Docker image, but it coincides with the branch name (default: **latest**, i.e. master branch)
 * **NETWORK** - TON network passed to MyTonCtrl installer. Valid values are `mainnet` or `testnet` (default **mainnet**)
 * **GLOBAL_CONFIG_URL** - URL of the TON blockchain configuration (default: [Mainnet](https://ton.org/global.config.json))
 * **MYTONCTRL_VERSION** - MyTonCtrl build branch (default **master**)
 * **TELEMETRY** - Enable/Disable telemetry (default **true**)
 * **IGNORE_MINIMAL_REQS** - Ignore hardware requirements (default **false**)
 * **MODE** - Install MyTonCtrl with specified mode (validator or liteserver, default **validator**)
-* **DUMP** - Use pre-packaged dump. Reduces duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
+* **DUMP** - Use pre-packaged dump. Reduces the duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
 * **DUMP_VALIDATE_BEFORE_EXTRACT** - Validate the downloaded lzip dump before extraction. This can take hours, so it is disabled by default. (default **false**)
 * **ARCHIVE_TTL** - Archive time-to-live in seconds for the validator (default **86400**)
 * **STATE_TTL** - State time-to-live in seconds for the validator (default **86400**)
-* **SYNC_BEFORE** - Initial sync download all blocks for the last given seconds (default **3600**)
 * **VERBOSITY** - Verbosity level for the validator engine (default **1**)
 * **CUSTOM_PARAMETERS** - Additional parameters appended to the end of `validator-engine` `ExecStart` command in `validator.service` (default empty)
 * **PUBLIC_IP** - Used when automatic detection of external IP does not work, e.g. in Kubernetes.
-* **VALIDATOR_PORT** - Set custom validator UDP port (default **random**)
-* **LITESERVER_PORT** - Set custom lite-server TCP port (default **random**)
-* **VALIDATOR_CONSOLE_PORT** - Set custom validator-console TCP port (default **random**)
+* **VALIDATOR_PORT** - Set custom validator UDP port (default **30001**)
+* **QUIC_PORT** - Set custom validator QUIC UDP port (default **31001**)
+* **LITESERVER_PORT** - Set custom lite-server TCP port (default **30003**)
+* **VALIDATOR_CONSOLE_PORT** - Set custom validator-console TCP port (default **30002**)
 
 ## Run TON node with MyTonCtrl v2
 
