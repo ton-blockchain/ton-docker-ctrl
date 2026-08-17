@@ -12,30 +12,32 @@ To run, you need docker-ce, docker-buildx-plugin:
 ## Configuration
 Build environment variables are configured in the `.env `file:
 
-* **TON_BRANCH** - when building this image you can specify which TON branch binaries will be based on. Actually it is a TAG name of TON Docker image, but it coincides with the branch name (default: **latest**, i.e. master branch)
+* **TON_BRANCH** - when building this image, you can specify which TON branch binaries will be based on. Actually it is a TAG name of TON Docker image, but it coincides with the branch name (default: **latest**, i.e. master branch)
+* **NETWORK** - TON network passed to MyTonCtrl installer. Valid values are `mainnet` or `testnet` (default **mainnet**)
 * **GLOBAL_CONFIG_URL** - URL of the TON blockchain configuration (default: [Mainnet](https://ton.org/global.config.json))
 * **MYTONCTRL_VERSION** - MyTonCtrl build branch (default **master**)
 * **TELEMETRY** - Enable/Disable telemetry (default **true**)
 * **IGNORE_MINIMAL_REQS** - Ignore hardware requirements (default **false**)
 * **MODE** - Install MyTonCtrl with specified mode (validator or liteserver, default **validator**)
-* **DUMP** - Use pre-packaged dump. Reduces duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
+* **DUMP** - Use pre-packaged dump. Reduces the duration of initial synchronization, but it takes time to download the dump. You can view the download status in the logs `docker-compose logs -f`. (default **false**)
+* **DUMP_VALIDATE_BEFORE_EXTRACT** - Validate the downloaded lzip dump before extraction. This can take hours, so it is disabled by default. (default **false**)
 * **ARCHIVE_TTL** - Archive time-to-live in seconds for the validator (default **86400**)
 * **STATE_TTL** - State time-to-live in seconds for the validator (default **86400**)
-* **SYNC_BEFORE** - Initial sync download all blocks for the last given seconds (default **3600**)
 * **VERBOSITY** - Verbosity level for the validator engine (default **1**)
 * **CUSTOM_PARAMETERS** - Additional parameters appended to the end of `validator-engine` `ExecStart` command in `validator.service` (default empty)
 * **PUBLIC_IP** - Used when automatic detection of external IP does not work, e.g. in Kubernetes.
-* **VALIDATOR_PORT** - Set custom validator UDP port (default **random**)
-* **LITESERVER_PORT** - Set custom lite-server TCP port (default **random**)
-* **VALIDATOR_CONSOLE_PORT** - Set custom validator-console TCP port (default **random**)
+* **VALIDATOR_PORT** - Set custom validator UDP port (default **30001**)
+* **QUIC_PORT** - Set custom validator QUIC UDP port (default **31001**)
+* **LITESERVER_PORT** - Set custom lite-server TCP port (default **30003**)
+* **VALIDATOR_CONSOLE_PORT** - Set custom validator-console TCP port (default **30002**)
 
 ## Run TON node with MyTonCtrl v2
 
 This is the simplest and the quickest way to set up and start the TON validator.
 It will use a historical dump of data to speed up the initial sync process.
 It will not start validation unless you top up the wallet.
-Below docker compose commands will create two docker volumes `ton-work` and `mytoncore`. 
-The first one will contain the blockchain data, and the second - MyTonCtrl settings and most importantly, wallets' data.
+Below docker compose commands will create Docker volumes `ton-work`, `mytoncore`, `mytonctrl`, and `ton-src`.
+`ton-work` contains blockchain data, `mytoncore` contains MyTonCtrl settings and wallet data, `mytonctrl` contains files written under `/usr/local/bin/mytonctrl`, and `ton-src` contains the TON source checkout used by Fift/MyTonCtrl.
 Real paths of these volumes can be found using `docker volume inspect <volume-name>` command.
 
 We recommend changing default Docker volumes' location, since the blockchain's data can grow rapidly, 
@@ -57,6 +59,7 @@ After setting `PUBLIC_IP` and other parameters, you are ready to start the **MAI
 To run **TESTNET** node, additionally change this in `.env`:
 ```bash
 TON_BRANCH=testnet
+NETWORK=testnet
 GLOBAL_CONFIG_URL=https://ton.org/testnet-global.config.json
 ```
 
@@ -69,13 +72,18 @@ or Docker only way:
 ```bash
 docker volume create ton-work
 docker volume create mytoncore
+docker volume create mytonctrl
+docker volume create ton-src
 
 docker run -d --name ton-node \
         --env-file .env \
         -p "0.0.0.0:30001:30001/udp" \
+        -p "0.0.0.0:30001:31001/udp" \
         -p "0.0.0.0:30003:30003/tcp" \
         -v ton-work:/var/ton-work \
         -v mytoncore:/usr/local/bin/mytoncore \
+        -v mytonctrl:/usr/local/bin/mytonctrl \
+        -v ton-src:/usr/src/ton \
         --restart unless-stopped \
         -it ghcr.io/ton-blockchain/ton-docker-ctrl:testnet
 ```
@@ -116,7 +124,19 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /path/to/mtc_data 
+      device: /path/to/mytoncore_data 
+  mytonctrl:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /path/to/mytonctrl_data
+  ton-src:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /path/to/ton_src
 ```
 
 Remember to set `PUBLIC_IP` in `.env`. Start the archive node:
@@ -195,6 +215,8 @@ docker run -it --entrypoint=bash ghcr.io/ton-blockchain/ton-docker-ctrl:latest
 docker volume ls
 docker volume inspect ton-work
 docker volume inspect mytoncore
+docker volume inspect mytonctrl
+docker volume inspect ton-src
 ```
 
 ## Uninstall the TON node
@@ -202,5 +224,5 @@ The TON dblockchain data will be deleted, as well as MyTonCtrl settings and **wa
 ```bash
 docker stop ton-node
 docker rm ton-node
-docker volume rm mytoncore ton-work
+docker volume rm mytonctrl mytoncore ton-src ton-work
 ```

@@ -2,6 +2,7 @@
 set -e
 
 TON_BRANCH=${TON_BRANCH:-latest}
+NETWORK=${NETWORK:-mainnet}
 GLOBAL_CONFIG_URL=${GLOBAL_CONFIG_URL:-https://ton.org/global.config.json}
 ARCHIVE_TTL=${ARCHIVE_TTL:-86400}
 STATE_TTL=${STATE_TTL:-86400}
@@ -10,11 +11,19 @@ CUSTOM_PARAMETERS=${CUSTOM_PARAMETERS:-}
 IGNORE_MINIMAL_REQS=${IGNORE_MINIMAL_REQS:-false}
 TELEMETRY=${TELEMETRY:-true}
 DUMP=${DUMP:-false}
+DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS:-1}
+DUMP_VALIDATE_BEFORE_EXTRACT=${DUMP_VALIDATE_BEFORE_EXTRACT:-false}
+DUMP_DEBUG_SHA256=${DUMP_DEBUG_SHA256:-false}
+DUMP_KEEP_FAILED_ARCHIVE=${DUMP_KEEP_FAILED_ARCHIVE:-false}
+DUMP_CACHE_DIR=${DUMP_CACHE_DIR:-/var/ton-work/dump-cache}
 MODE=${MODE:-validator}
 MYTONCTRL_VERSION=${MYTONCTRL_VERSION:-master}
+ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE=${ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE:-false}
+export DUMP_EXTRACT_THREADS DUMP_VALIDATE_BEFORE_EXTRACT DUMP_DEBUG_SHA256 DUMP_KEEP_FAILED_ARCHIVE DUMP_CACHE_DIR
 TON_DB_DIR=/var/ton-work/db
+TON_SOURCE_DIR=/usr/src/ton
 MTC_DONE_FILE=${TON_DB_DIR}/mtc_done
-DUMP_DOWNLOAD_FILE=${TON_DB_DIR}/latest.tar.lz
+DUMP_DOWNLOAD_FILE=${DUMP_CACHE_DIR}/latest.tar.lz
 DUMP_ARIA2_CONTROL_FILE=${DUMP_DOWNLOAD_FILE}.aria2
 INSTALL_LOG_FILE=/tmp/mytonctrl-install.log
 SYSTEMD_UNITS_DIR=/var/ton-work/db/systemd-units
@@ -26,7 +35,19 @@ SYSTEMD_UNITS_FALLBACK_DIR=/usr/local/bin/mytoncore/systemd-units
 VALIDATOR_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/validator.service
 MYTONCORE_SERVICE_FALLBACK_CACHE=${SYSTEMD_UNITS_FALLBACK_DIR}/mytoncore.service
 MYTONCTRL_CLI_FILE=/usr/bin/mytonctrl
+MYTONCTRL_DIR=/usr/local/bin/mytonctrl
 CUSTOM_PARAMETERS_STATE_FILE=${TON_DB_DIR}/custom_parameters.applied
+BOOTSTRAP_TRANSACTION_MARKER=/var/ton-work/.bootstrap-transaction-active
+BOOTSTRAP_ROLLBACK_BASENAME=.bootstrap-rollback
+BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME=.bootstrap-systemd-rollback
+BOOTSTRAP_ROOT_METADATA_FILE=.bootstrap-root-metadata
+TON_WORK_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_ROLLBACK_BASENAME}
+MYTONCORE_ROLLBACK_DIR=/usr/local/bin/mytoncore/${BOOTSTRAP_ROLLBACK_BASENAME}
+MYTONCTRL_ROLLBACK_DIR=${MYTONCTRL_DIR}/${BOOTSTRAP_ROLLBACK_BASENAME}
+BOOTSTRAP_SYSTEMD_ROLLBACK_DIR=/var/ton-work/${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}
+MYTONCORE_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db
+MYTONCORE_DB_DB_FILE=/usr/local/bin/mytoncore/mytoncore.db.db
+MYTONCORE_VENV_PYTHON=${MYTONCORE_VENV_PYTHON:-/usr/local/bin/mytoncore/venv/bin/python3}
 SYSTEMCTL_BIN=/usr/bin/systemctl
 PYTHON_SITE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 PYTHON_MODULES_CACHE_DIR=/usr/local/bin/mytoncore/python-site-packages
@@ -52,8 +73,14 @@ MYTONCTRL_PYTHON_PATTERNS=(
 echo "Started with environment variables:"
 echo
 echo TON_BRANCH $TON_BRANCH
+echo NETWORK $NETWORK
 echo IGNORE_MINIMAL_REQS $IGNORE_MINIMAL_REQS
 echo DUMP $DUMP
+echo DUMP_EXTRACT_THREADS $DUMP_EXTRACT_THREADS
+echo DUMP_VALIDATE_BEFORE_EXTRACT $DUMP_VALIDATE_BEFORE_EXTRACT
+echo DUMP_DEBUG_SHA256 $DUMP_DEBUG_SHA256
+echo DUMP_KEEP_FAILED_ARCHIVE $DUMP_KEEP_FAILED_ARCHIVE
+echo DUMP_CACHE_DIR $DUMP_CACHE_DIR
 echo MYTONCTRL_VERSION $MYTONCTRL_VERSION
 echo GLOBAL_CONFIG_URL $GLOBAL_CONFIG_URL
 echo ARCHIVE_BLOCKS $ARCHIVE_BLOCKS
@@ -67,6 +94,15 @@ echo PUBLIC_IP $PUBLIC_IP
 echo VALIDATOR_PORT $VALIDATOR_PORT
 echo LITESERVER_PORT $LITESERVER_PORT
 echo VALIDATOR_CONSOLE_PORT $VALIDATOR_CONSOLE_PORT
+
+case "${NETWORK}" in
+  mainnet|testnet)
+    ;;
+  *)
+    echo "Invalid NETWORK=${NETWORK}; expected mainnet or testnet."
+    exit 2
+    ;;
+esac
 
 # check machine configuration
 echo
@@ -106,8 +142,18 @@ systemd_units_cached() {
     (service_file_present "${MYTONCORE_SERVICE_CACHE}" || service_file_present "${MYTONCORE_SERVICE_FALLBACK_CACHE}")
 }
 
+mytoncore_db_present() {
+  [ -e "${MYTONCORE_DB_FILE}" ] || [ -e "${MYTONCORE_DB_DB_FILE}" ]
+}
+
+bootstrap_state_complete_without_marker() {
+  [ -s "${TON_DB_DIR}/config.json" ] &&
+    mytoncore_db_present &&
+    (systemd_units_available || systemd_units_cached)
+}
+
 normalize_ton_permissions() {
-  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets
+  mkdir -p /var/ton-work /var/ton-work/db /var/ton-work/db/systemd-units "${DUMP_CACHE_DIR}" /usr/local/bin/mytoncore /usr/local/bin/mytoncore/wallets "${MYTONCTRL_DIR}" "${TON_SOURCE_DIR}"
   mkdir -p /var/ton-work/db/error 2>/dev/null || true
 
   for path in \
@@ -116,9 +162,11 @@ normalize_ton_permissions() {
     /var/ton-work/db/keyring \
     /var/ton-work/db/systemd-units \
     /var/ton-work/db/error \
+    "${DUMP_CACHE_DIR}" \
     /var/ton-work/keys \
     /usr/local/bin/mytoncore \
-    /usr/local/bin/mytoncore/wallets; do
+    /usr/local/bin/mytoncore/wallets \
+    "${MYTONCTRL_DIR}"; do
     [ -e "${path}" ] || continue
     chown validator:validator "${path}" 2>/dev/null || true
   done
@@ -126,6 +174,13 @@ normalize_ton_permissions() {
   if [ -f "${TON_DB_DIR}/config.json" ]; then
     chown validator:validator "${TON_DB_DIR}/config.json" 2>/dev/null || true
   fi
+}
+
+configure_git_safe_directories() {
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+  git config --global --add safe.directory "${TON_SOURCE_DIR}" 2>/dev/null || true
 }
 
 restore_service_units() {
@@ -167,9 +222,251 @@ persist_service_units() {
 prepare_bootstrap_marker_state() {
   restore_service_units
 
+  if [ ! -f "${MTC_DONE_FILE}" ]; then
+    if bootstrap_state_complete_without_marker; then
+      echo "Detected complete persisted MyTonCtrl state without ${MTC_DONE_FILE}; restoring marker."
+      mkdir -p "${TON_DB_DIR}"
+      touch "${MTC_DONE_FILE}"
+      chown validator:validator "${MTC_DONE_FILE}" 2>/dev/null || true
+    fi
+    return
+  fi
+
   if [ -f "${MTC_DONE_FILE}" ] && ! systemd_units_available && ! systemd_units_cached; then
+    if mytoncore_db_present; then
+      echo "Detected ${MTC_DONE_FILE} and persisted MyTonCtrl DB, but no persisted systemd unit files."
+      echo "Keeping ${MTC_DONE_FILE} to avoid forcing bootstrap over an existing MyTonCtrl database."
+      return
+    fi
     echo "Detected ${MTC_DONE_FILE} but no persisted systemd unit files; forcing one bootstrap run."
     rm -f "${MTC_DONE_FILE}" || true
+  fi
+}
+
+copy_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+  local child_path
+  local child_name
+
+  mkdir -p "${volume_root}"
+  rm -rf "${snapshot_dir}"
+  mkdir -p "${snapshot_dir}"
+  stat -c '%u %g %a' "${volume_root}" > "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}"
+
+  while IFS= read -r -d '' child_path; do
+    child_name=$(basename "${child_path}")
+    case "${child_name}" in
+      "${BOOTSTRAP_ROLLBACK_BASENAME}"|"${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}"|"$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")")
+        continue
+        ;;
+    esac
+
+    if mountpoint -q "${child_path}" 2>/dev/null; then
+      echo "Skipping mounted path during bootstrap snapshot: ${child_path}"
+      continue
+    fi
+
+    cp -a "${child_path}" "${snapshot_dir}/"
+  done < <(find "${volume_root}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+clear_volume_current_state() {
+  local volume_root="$1"
+  local child_path
+  local child_name
+
+  mkdir -p "${volume_root}"
+
+  while IFS= read -r -d '' child_path; do
+    child_name=$(basename "${child_path}")
+    case "${child_name}" in
+      "${BOOTSTRAP_ROLLBACK_BASENAME}"|"${BOOTSTRAP_SYSTEMD_ROLLBACK_BASENAME}"|"$(basename "${BOOTSTRAP_TRANSACTION_MARKER}")")
+        continue
+        ;;
+    esac
+
+    if mountpoint -q "${child_path}" 2>/dev/null; then
+      echo "Skipping mounted path during bootstrap rollback cleanup: ${child_path}"
+      continue
+    fi
+
+    if ! rm -rf -- "${child_path}"; then
+      echo "WARNING: failed to remove ${child_path} during bootstrap rollback cleanup; continuing."
+    fi
+  done < <(find "${volume_root}" -mindepth 1 -maxdepth 1 -print0)
+}
+
+restore_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+  local owner_uid
+  local owner_gid
+  local root_mode
+
+  if [ ! -d "${snapshot_dir}" ]; then
+    echo "ERROR: bootstrap rollback snapshot is missing: ${snapshot_dir}"
+    return 1
+  fi
+
+  clear_volume_current_state "${volume_root}"
+
+  find "${snapshot_dir}" -mindepth 1 -maxdepth 1 \
+    ! -name "${BOOTSTRAP_ROOT_METADATA_FILE}" \
+    -exec cp -a -t "${volume_root}" -- {} +
+
+  if [ -f "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}" ]; then
+    read -r owner_uid owner_gid root_mode < "${snapshot_dir}/${BOOTSTRAP_ROOT_METADATA_FILE}"
+    chown "${owner_uid}:${owner_gid}" "${volume_root}" 2>/dev/null || true
+    chmod "${root_mode}" "${volume_root}" 2>/dev/null || true
+  fi
+}
+
+restore_optional_volume_snapshot() {
+  local volume_root="$1"
+  local snapshot_dir="$2"
+
+  if [ ! -d "${snapshot_dir}" ]; then
+    echo "Optional bootstrap rollback snapshot is missing; skipping: ${snapshot_dir}"
+    return 0
+  fi
+
+  restore_volume_snapshot "${volume_root}" "${snapshot_dir}"
+}
+
+snapshot_systemd_unit_files() {
+  local service_path
+  local service_name
+
+  rm -rf "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}"
+  mkdir -p "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}"
+
+  for service_path in "${VALIDATOR_SERVICE}" "${MYTONCORE_SERVICE}"; do
+    service_name=$(basename "${service_path}")
+
+    if [ -e "${service_path}" ]; then
+      cp -a "${service_path}" "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}"
+    else
+      touch "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}.absent"
+    fi
+  done
+}
+
+restore_systemd_unit_files_snapshot() {
+  local service_path
+  local service_name
+
+  if [ ! -d "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}" ]; then
+    return
+  fi
+
+  for service_path in "${VALIDATOR_SERVICE}" "${MYTONCORE_SERVICE}"; do
+    service_name=$(basename "${service_path}")
+
+    if [ -e "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}" ]; then
+      cp -a "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}" "${service_path}"
+    elif [ -e "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}/${service_name}.absent" ]; then
+      rm -f "${service_path}"
+    fi
+  done
+}
+
+cleanup_bootstrap_transaction_snapshots() {
+  rm -rf \
+    "${TON_WORK_ROLLBACK_DIR}" \
+    "${MYTONCORE_ROLLBACK_DIR}" \
+    "${MYTONCTRL_ROLLBACK_DIR}" \
+    "${BOOTSTRAP_SYSTEMD_ROLLBACK_DIR}" \
+    "${BOOTSTRAP_TRANSACTION_MARKER}" \
+    2>/dev/null || true
+}
+
+rollback_bootstrap_transaction() {
+  echo "Rolling back incomplete MyTonCtrl bootstrap transaction."
+
+  restore_systemd_unit_files_snapshot
+  restore_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
+  restore_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+  restore_optional_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
+
+  rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
+  cleanup_bootstrap_transaction_snapshots
+  bootstrap_transaction_active=false
+}
+
+recover_interrupted_bootstrap_transaction() {
+  if [ -f "${BOOTSTRAP_TRANSACTION_MARKER}" ]; then
+    echo "Detected interrupted MyTonCtrl bootstrap transaction from a previous start."
+    rollback_bootstrap_transaction
+  else
+    cleanup_bootstrap_transaction_snapshots
+  fi
+}
+
+begin_bootstrap_transaction() {
+  echo "Starting atomic MyTonCtrl bootstrap transaction."
+
+  cleanup_bootstrap_transaction_snapshots
+  copy_volume_snapshot /var/ton-work "${TON_WORK_ROLLBACK_DIR}"
+  copy_volume_snapshot /usr/local/bin/mytoncore "${MYTONCORE_ROLLBACK_DIR}"
+  copy_volume_snapshot "${MYTONCTRL_DIR}" "${MYTONCTRL_ROLLBACK_DIR}"
+  snapshot_systemd_unit_files
+
+  {
+    echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "pid=$$"
+  } > "${BOOTSTRAP_TRANSACTION_MARKER}"
+
+  bootstrap_transaction_active=true
+}
+
+commit_bootstrap_transaction() {
+  if [ "${bootstrap_transaction_active}" != true ]; then
+    return
+  fi
+
+  echo "Committing atomic MyTonCtrl bootstrap transaction."
+
+  bootstrap_transaction_active=false
+  rm -f "${BOOTSTRAP_TRANSACTION_MARKER}"
+  cleanup_bootstrap_transaction_snapshots
+}
+
+rollback_bootstrap_transaction_on_exit() {
+  local exit_code=$?
+
+  if [ "${bootstrap_transaction_active}" = true ]; then
+    echo "MyTonCtrl bootstrap did not reach commit point; rolling back persistent state."
+    rollback_bootstrap_transaction
+  fi
+
+  return "${exit_code}"
+}
+
+validate_bootstrap_commit_ready() {
+  local missing=false
+  local required_service_file
+
+  if [ ! -f "${MTC_DONE_FILE}" ]; then
+    echo "Required bootstrap marker is missing: ${MTC_DONE_FILE}"
+    missing=true
+  fi
+
+  for required_service_file in \
+    "${VALIDATOR_SERVICE}" \
+    "${MYTONCORE_SERVICE}" \
+    "${VALIDATOR_SERVICE_CACHE}" \
+    "${MYTONCORE_SERVICE_CACHE}" \
+    "${VALIDATOR_SERVICE_FALLBACK_CACHE}" \
+    "${MYTONCORE_SERVICE_FALLBACK_CACHE}"; do
+    if ! service_file_present "${required_service_file}"; then
+      echo "Required bootstrap service file is missing or empty: ${required_service_file}"
+      missing=true
+    fi
+  done
+
+  if [ "${missing}" = true ]; then
+    return 1
   fi
 }
 
@@ -222,22 +519,79 @@ persist_python_modules_to_cache() {
   fi
 }
 
+mytonctrl_python_command() {
+  local python_bin
+
+  for python_bin in \
+    "${MYTONCORE_VENV_PYTHON}" \
+    /usr/local/bin/mytoncore/venv/bin/python \
+    /usr/bin/python3 \
+    python3; do
+    if ! command -v "${python_bin}" >/dev/null 2>&1; then
+      continue
+    fi
+    if "${python_bin}" -c "import mytonctrl" >/dev/null 2>&1; then
+      printf '%s' "${python_bin}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 ensure_mytonctrl_cli() {
+  local python_bin
+
   if [ -x "${MYTONCTRL_CLI_FILE}" ]; then
     return
   fi
 
-  if ! python3 -c "import mytonctrl" >/dev/null 2>&1; then
+  python_bin="$(mytonctrl_python_command || true)"
+  if [ -z "${python_bin}" ]; then
     echo "WARNING: mytonctrl python module is missing, ${MYTONCTRL_CLI_FILE} cannot be restored."
     return
   fi
 
-  cat > "${MYTONCTRL_CLI_FILE}" <<'EOF'
+  cat > "${MYTONCTRL_CLI_FILE}" <<EOF
 #!/bin/bash
-exec /usr/bin/python3 -m mytonctrl "$@"
+exec "${python_bin}" -m mytonctrl "\$@"
 EOF
   chmod +x "${MYTONCTRL_CLI_FILE}"
-  echo "Restored ${MYTONCTRL_CLI_FILE}"
+  echo "Restored ${MYTONCTRL_CLI_FILE} using ${python_bin}"
+}
+
+resolve_ton_source_branch() {
+  if [ "$TON_BRANCH" == "latest" ]; then
+    echo "master"
+  else
+    echo "$TON_BRANCH"
+  fi
+}
+
+ensure_ton_sources() {
+  local branch="$1"
+
+  if [ -f "${TON_SOURCE_DIR}/crypto/fift/lib/Fift.fif" ] && [ -f "${TON_SOURCE_DIR}/crypto/smartcont/wallet.fif" ]; then
+    return
+  fi
+
+  echo "TON source tree is missing Fift files; fetching ${branch} into ${TON_SOURCE_DIR}"
+  mkdir -p "${TON_SOURCE_DIR}"
+  cd "${TON_SOURCE_DIR}"
+
+  if [ ! -d .git ]; then
+    git init
+    git remote add origin https://github.com/ton-blockchain/ton.git
+  elif ! git remote get-url origin >/dev/null 2>&1; then
+    git remote add origin https://github.com/ton-blockchain/ton.git
+  else
+    git remote set-url origin https://github.com/ton-blockchain/ton.git
+  fi
+
+  git fetch origin "$branch"
+  git checkout -B "$branch" FETCH_HEAD
+  git reset --hard FETCH_HEAD
+  git clean -fdx
 }
 
 resolve_install_dump_arg() {
@@ -250,8 +604,132 @@ resolve_install_dump_arg() {
   INSTALL_DUMP_ARG="-d"
 }
 
+configure_dump_extract_threads() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if ! [[ "${DUMP_EXTRACT_THREADS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}; expected positive integer."
+    exit 2
+  fi
+
+  if [ "${DUMP_EXTRACT_THREADS}" = "8" ]; then
+    return
+  fi
+
+  if [ ! -x /usr/bin/plzip ]; then
+    return
+  fi
+
+  cat > /usr/local/bin/plzip <<'EOF'
+#!/bin/bash
+set -e
+threads="${DUMP_EXTRACT_THREADS:-1}"
+args=()
+for arg in "$@"; do
+  if [[ "$arg" =~ ^-n[0-9]+$ ]]; then
+    args+=("-n${threads}")
+  else
+    args+=("$arg")
+  fi
+done
+exec /usr/bin/plzip "${args[@]}"
+EOF
+  chmod +x /usr/local/bin/plzip
+  echo "Configured plzip wrapper to use DUMP_EXTRACT_THREADS=${DUMP_EXTRACT_THREADS}"
+}
+
+configure_dump_extraction_timer() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if [ ! -x /usr/bin/tar ]; then
+    return
+  fi
+
+  cat > /usr/local/bin/tar <<'EOF'
+#!/bin/bash
+set -e
+
+format_elapsed() {
+  local total_seconds="$1"
+  local hours=$((total_seconds / 3600))
+  local minutes=$(((total_seconds % 3600) / 60))
+  local seconds=$((total_seconds % 60))
+
+  if [ "${hours}" -gt 0 ]; then
+    printf '%dh %dm %ds' "${hours}" "${minutes}" "${seconds}"
+  elif [ "${minutes}" -gt 0 ]; then
+    printf '%dm %ds' "${minutes}" "${seconds}"
+  else
+    printf '%ds' "${seconds}"
+  fi
+}
+
+extract_arg=false
+dump_db_destination=false
+next_arg_is_destination=false
+
+for arg in "$@"; do
+  if [ "${next_arg_is_destination}" = true ]; then
+    if [ "${arg%/}" = "/var/ton-work/db" ]; then
+      dump_db_destination=true
+    fi
+    next_arg_is_destination=false
+  fi
+
+  case "${arg}" in
+    --extract|-[!-]*x*|-x*)
+      extract_arg=true
+      ;;
+    -C|--directory)
+      next_arg_is_destination=true
+      ;;
+    -C/var/ton-work/db|-C/var/ton-work/db/|--directory=/var/ton-work/db|--directory=/var/ton-work/db/)
+      dump_db_destination=true
+      ;;
+  esac
+done
+
+if [ "${extract_arg}" = true ] && [ "${dump_db_destination}" = true ]; then
+  started_at=$(date +%s)
+  set +e
+  /usr/bin/tar "$@"
+  tar_rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started_at ))
+
+  if [ "${tar_rc}" -eq 0 ]; then
+    echo "Dump extraction completed in $(format_elapsed "${elapsed}")"
+  else
+    echo "Dump extraction failed after $(format_elapsed "${elapsed}")"
+  fi
+
+  exit "${tar_rc}"
+fi
+
+exec /usr/bin/tar "$@"
+EOF
+  chmod +x /usr/local/bin/tar
+  echo "Configured dump extraction timer for /var/ton-work/db"
+}
+
 dump_download_artifacts_present() {
-  [ -f "${DUMP_DOWNLOAD_FILE}" ] || [ -f "${DUMP_ARIA2_CONTROL_FILE}" ]
+  local dump_artifact_dir
+
+  for dump_artifact_dir in "${TON_DB_DIR}" "${DUMP_CACHE_DIR}"; do
+    [ -d "${dump_artifact_dir}" ] || continue
+
+    if find "${dump_artifact_dir}" -maxdepth 1 -type f \
+      \( -name "*.tar.lz" -o -name "*.tar.lz.aria2" \) \
+      -print -quit | grep -q .; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 clear_validator_config_for_dump_retry() {
@@ -276,6 +754,101 @@ dump_download_failed_in_log() {
   [ -f "${INSTALL_LOG_FILE}" ] && grep -q "Dump download failed" "${INSTALL_LOG_FILE}"
 }
 
+dump_extraction_failed_in_log() {
+  [ -f "${INSTALL_LOG_FILE}" ] && grep -Eq "Dump extraction failed|Data error in worker|Unexpected EOF in archive|tar: Error is not recoverable" "${INSTALL_LOG_FILE}"
+}
+
+clear_partial_dump_bootstrap_state() {
+  local dump_artifact_dir
+
+  echo "Clearing partial dump/bootstrap state before retry."
+  rm -f "${MTC_DONE_FILE}" 2>/dev/null || true
+  rm -f "${TON_DB_DIR}/config.json" 2>/dev/null || true
+  rm -rf "${SYSTEMD_UNITS_DIR}" 2>/dev/null || true
+
+  # A failed tar extraction can leave corrupt partial TON DB payload behind.
+  rm -rf \
+    "${TON_DB_DIR}/archive" \
+    "${TON_DB_DIR}/celldb" \
+    "${TON_DB_DIR}/files" \
+    "${TON_DB_DIR}/state" \
+    "${TON_DB_DIR}/keyring" \
+    "${TON_DB_DIR}/error" \
+    2>/dev/null || true
+
+  if [ "${DUMP_KEEP_FAILED_ARCHIVE}" = true ]; then
+    echo "Preserving dump archive artifacts because DUMP_KEEP_FAILED_ARCHIVE=true."
+  else
+    for dump_artifact_dir in "${TON_DB_DIR}" "${DUMP_CACHE_DIR}"; do
+      [ -d "${dump_artifact_dir}" ] || continue
+      find "${dump_artifact_dir}" -maxdepth 1 -type f \( -name "*.tar.lz" -o -name "*.tar.lz.aria2" -o -name "latest.tar.lz" -o -name "latest.tar.lz.aria2" \) -delete 2>/dev/null || true
+    done
+  fi
+}
+
+legacy_partial_bootstrap_state_present() {
+  [ -e "${TON_DB_DIR}/config.json" ] ||
+    [ -e "${MYTONCORE_DB_FILE}" ] ||
+    [ -e "${MYTONCORE_DB_DB_FILE}" ]
+}
+
+move_path_to_backup_dir() {
+  local source_path="$1"
+  local backup_dir="$2"
+
+  [ -e "${source_path}" ] || return 0
+
+  mkdir -p "${backup_dir}"
+  mv "${source_path}" "${backup_dir}/"
+}
+
+clear_legacy_partial_bootstrap_state() {
+  local backup_suffix
+  local ton_backup_dir
+  local mytoncore_backup_dir
+  local mytoncore_db_path
+
+  if [ -f "${MTC_DONE_FILE}" ]; then
+    return
+  fi
+
+  restore_service_units
+
+  if systemd_units_available || systemd_units_cached; then
+    return
+  fi
+
+  if ! legacy_partial_bootstrap_state_present; then
+    return
+  fi
+
+  if mytoncore_db_present && [ "${ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE}" != true ]; then
+    echo "Detected persistent MyTonCtrl DB without ${MTC_DONE_FILE} or persisted systemd units."
+    echo "Refusing to move /usr/local/bin/mytoncore/mytoncore.db* aside automatically."
+    echo "Restore ${MTC_DONE_FILE}/systemd-units from backup, or rerun with ALLOW_LEGACY_MYTONCORE_DB_QUARANTINE=true after taking a backup."
+    exit 64
+  fi
+
+  backup_suffix=$(date -u +%Y%m%dT%H%M%SZ)-$$
+  ton_backup_dir="${TON_DB_DIR}/legacy-partial-bootstrap-${backup_suffix}"
+  mytoncore_backup_dir="/usr/local/bin/mytoncore/legacy-partial-bootstrap-${backup_suffix}"
+
+  echo "Detected legacy partial MyTonCtrl bootstrap state without ${MTC_DONE_FILE} or persisted systemd units."
+  echo "Moving first-setup blockers aside so bootstrap can run DownloadDump."
+
+  move_path_to_backup_dir "${TON_DB_DIR}/config.json" "${ton_backup_dir}"
+
+  for mytoncore_db_path in /usr/local/bin/mytoncore/mytoncore.db*; do
+    move_path_to_backup_dir "${mytoncore_db_path}" "${mytoncore_backup_dir}"
+  done
+
+  clear_partial_dump_bootstrap_state
+
+  echo "Legacy partial bootstrap backups:"
+  echo "  ${ton_backup_dir}"
+  echo "  ${mytoncore_backup_dir}"
+}
+
 fail_if_dump_download_incomplete() {
   if [ "${DUMP}" != true ]; then
     return
@@ -283,10 +856,27 @@ fail_if_dump_download_incomplete() {
 
   if dump_download_artifacts_present || dump_download_failed_in_log; then
     if dump_download_artifacts_present; then
-      echo "Detected incomplete dump download artifacts; preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+      echo "Detected incomplete dump download artifacts."
+      if [ "${bootstrap_transaction_active}" = true ]; then
+        echo "Atomic bootstrap rollback will discard artifacts created by this attempt."
+      else
+        echo "Preserving ${DUMP_DOWNLOAD_FILE} for aria2 resume."
+      fi
     fi
     clear_validator_config_for_dump_retry
     echo "Dump download did not finish; leaving bootstrap incomplete so the next pod start resumes it."
+    exit 1
+  fi
+}
+
+fail_if_dump_extraction_failed() {
+  if [ "${DUMP}" != true ]; then
+    return
+  fi
+
+  if dump_extraction_failed_in_log; then
+    clear_partial_dump_bootstrap_state
+    echo "Dump extraction failed; leaving bootstrap incomplete so the next pod start retries from a clean state."
     exit 1
   fi
 }
@@ -503,37 +1093,42 @@ apply_service_overrides() {
 
 first_install=false
 bootstrap_completed=false
+bootstrap_transaction_active=false
 
-restore_python_modules_from_cache
+trap rollback_bootstrap_transaction_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+recover_interrupted_bootstrap_transaction
+configure_dump_extract_threads
+configure_dump_extraction_timer
 prepare_bootstrap_marker_state
-normalize_ton_permissions
-force_dump_download_retry_if_needed
 
 if [ ! -f "${MTC_DONE_FILE}" ]; then
   first_install=true
   echo "MyTonCtrl bootstrap required: ${MTC_DONE_FILE} not found"
+  begin_bootstrap_transaction
+  clear_legacy_partial_bootstrap_state
 else
   echo "MyTonCtrl already installed"
 fi
 
-if [ "${first_install}" = true ]; then
+restore_python_modules_from_cache
+normalize_ton_permissions
+configure_git_safe_directories
+force_dump_download_retry_if_needed
 
-  if [ "$TON_BRANCH" == "latest" ]; then
-    branch="master"
-  else
-    branch="$TON_BRANCH"
-  fi
-  cd /usr/src/ton
-  git checkout -B $branch
-  rm -rf *
-  git pull origin $branch
+branch=$(resolve_ton_source_branch)
+ensure_ton_sources "$branch"
+
+if [ "${first_install}" = true ]; then
 
   echo "Installing MyTonCtrl, version ${MYTONCTRL_VERSION}"
   wget -q https://raw.githubusercontent.com/ton-blockchain/mytonctrl/${MYTONCTRL_VERSION}/scripts/install.sh -O /tmp/install.sh
   if [ "$TELEMETRY" = false ]; then INSTALL_TELEMETRY_ARG="-t"; else INSTALL_TELEMETRY_ARG=""; fi
   if [ "$IGNORE_MINIMAL_REQS" = true ]; then INSTALL_IGNORE_MINIMAL_REQS_ARG="-i"; else INSTALL_IGNORE_MINIMAL_REQS_ARG=""; fi
   resolve_install_dump_arg
-  if [ "$TON_BRANCH" != "latest" ]; then INSTALL_NETWORK_ARG="-n testnet"; else INSTALL_NETWORK_ARG=""; fi
+  INSTALL_NETWORK_ARG="-n ${NETWORK}"
   echo
   echo /bin/bash /tmp/install.sh ${INSTALL_TELEMETRY_ARG} ${INSTALL_IGNORE_MINIMAL_REQS_ARG} -b ${MYTONCTRL_VERSION} -m ${MODE} ${INSTALL_DUMP_ARG} ${INSTALL_NETWORK_ARG}
   echo
@@ -543,6 +1138,7 @@ if [ "${first_install}" = true ]; then
   install_rc=${PIPESTATUS[0]}
   set -e
   fail_if_dump_download_incomplete
+  fail_if_dump_extraction_failed
 
   if [ "${install_rc}" -ne 0 ]; then
     echo "MyTonCtrl installer failed with exit code ${install_rc}."
@@ -570,6 +1166,9 @@ normalize_ton_permissions
 
 if [ "${bootstrap_completed}" = true ]; then
   touch "${MTC_DONE_FILE}"
+  chown validator:validator "${MTC_DONE_FILE}" 2>/dev/null || true
+  validate_bootstrap_commit_ready
+  commit_bootstrap_transaction
 fi
 
 if ! run_systemctl daemon-reload; then

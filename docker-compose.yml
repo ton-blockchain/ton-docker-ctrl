@@ -11,16 +11,19 @@ services:
     volumes:
       - ton:/var/ton-work
       - mytoncore:/usr/local/bin/mytoncore
+      - mytonctrl:/usr/local/bin/mytonctrl
+      - ton-src:/usr/src/ton
     environment:
       TON_BRANCH: ${TON_BRANCH}
+      NETWORK: ${NETWORK:-mainnet}
       GLOBAL_CONFIG_URL: ${GLOBAL_CONFIG_URL}
       IGNORE_MINIMAL_REQS: ${IGNORE_MINIMAL_REQS}
       MYTONCTRL_VERSION: ${MYTONCTRL_VERSION}
       DUMP: ${DUMP}
+      DUMP_VALIDATE_BEFORE_EXTRACT: ${DUMP_VALIDATE_BEFORE_EXTRACT:-false}
       MODE: ${MODE}
       ARCHIVE_TTL: ${ARCHIVE_TTL}
       STATE_TTL: ${STATE_TTL}
-      SYNC_BEFORE: ${SYNC_BEFORE}
       VERBOSITY: ${VERBOSITY}
       CUSTOM_PARAMETERS: ${CUSTOM_PARAMETERS:-}
       PUBLIC_IP: ${PUBLIC_IP}
@@ -38,3 +41,7 @@ volumes:
     name: ton-work
   mytoncore:
     name: mytoncore
+  mytonctrl:
+    name: mytonctrl
+  ton-src:
+    name: ton-src
