@@ -23,6 +23,7 @@ RUN set -eux; \
         libsecp256k1-dev libsodium-dev liblz4-dev libjemalloc2 libjemalloc-dev; \
     ln -sf /usr/bin/clang-22 /usr/bin/clang; \
     ln -sf /usr/bin/clang++-22 /usr/bin/clang++; \
+    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED; \
     curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal; \
     /root/.cargo/bin/rustup toolchain install stable; \
     /root/.cargo/bin/rustup default stable; \
